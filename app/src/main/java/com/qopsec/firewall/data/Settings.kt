@@ -82,6 +82,15 @@ class Settings private constructor(context: Context) {
         _dnsResolver.value = ip
     }
 
+    // --- Connections view: persisted status/kind/sort (plain strings; Compose holds the live
+    // state, these just survive app restarts). Values are enum .name; callers tolerate bad reads.
+    fun connFilter(): String = prefs.getString(KEY_CFILTER, "All") ?: "All"
+    fun setConnFilter(v: String) = prefs.edit().putString(KEY_CFILTER, v).apply()
+    fun connKind(): String = prefs.getString(KEY_CKIND, "Any") ?: "Any"
+    fun setConnKind(v: String) = prefs.edit().putString(KEY_CKIND, v).apply()
+    fun connSort(): String = prefs.getString(KEY_CSORT, "Recent") ?: "Recent"
+    fun setConnSort(v: String) = prefs.edit().putString(KEY_CSORT, v).apply()
+
     companion object {
         private const val KEY_ASK = "ask_mode"
         private const val KEY_BOOT = "boot_lock"
@@ -89,6 +98,9 @@ class Settings private constructor(context: Context) {
         private const val KEY_ADBLOCK = "ad_block"
         private const val KEY_ENCDNS = "block_encrypted_dns"
         private const val KEY_DNS = "dns_resolver"
+        private const val KEY_CFILTER = "conn_filter"
+        private const val KEY_CKIND = "conn_kind"
+        private const val KEY_CSORT = "conn_sort"
         const val DEFAULT_DNS = "1.1.1.1"
 
         @Volatile private var INSTANCE: Settings? = null

@@ -25,6 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -176,6 +178,13 @@ private enum class ConnFilter(val label: String) {
     All("All"), Allowed("Allowed"), Blocked("Blocked"), Ads("Ads & trackers")
 }
 
+/** Second, independent filter dimension: protocol or a common destination port. */
+private enum class ConnKind(val label: String) {
+    Any("Any"), TCP("TCP"), UDP("UDP"), DNS(":53"), HTTPS(":443"), HTTP(":80")
+}
+
+private enum class ConnSort(val label: String) { Recent("Recent"), Name("Name"), Busiest("Busiest") }
+
 @Composable
 private fun ConnectionsTab(repo: RuleRepository) {
     val context = LocalContext.current
@@ -193,7 +202,15 @@ private fun ConnectionsTab(repo: RuleRepository) {
     val expanded = remember { mutableStateMapOf<Int, Boolean>() }
     var hostDialog by remember { mutableStateOf<HostTarget?>(null) }
     var query by remember { mutableStateOf("") }
-    var filter by remember { mutableStateOf(ConnFilter.All) }
+    var filter by remember {
+        mutableStateOf(runCatching { ConnFilter.valueOf(settings.connFilter()) }.getOrDefault(ConnFilter.All))
+    }
+    var kind by remember {
+        mutableStateOf(runCatching { ConnKind.valueOf(settings.connKind()) }.getOrDefault(ConnKind.Any))
+    }
+    var sort by remember {
+        mutableStateOf(runCatching { ConnSort.valueOf(settings.connSort()) }.getOrDefault(ConnSort.Recent))
+    }
 
     // Precompute the rules-only verdict + the ad/tracker status (DNS blocklist) per flow, once,
     // so neither the filter nor the rows re-run the matcher on every keystroke/recompose.
@@ -207,12 +224,12 @@ private fun ConnectionsTab(repo: RuleRepository) {
         }
     }
 
-    val filtering = query.isNotBlank() || filter != ConnFilter.All
+    val filtering = query.isNotBlank() || filter != ConnFilter.All || kind != ConnKind.Any
 
     // Groups are always built from ALL of an app's events (so the per-app status pill stays
     // truthful); `visible` is the filtered subset shown when expanded. Apps with no visible
     // child are dropped. A text hit on the app name shows all its (filter-passing) children.
-    val groups = remember(events, annos, query, filter) {
+    val groups = remember(events, annos, query, filter, kind, sort) {
         val q = query.trim().lowercase()
         events.groupBy { it.uid }
             .map { (uid, evs) ->
@@ -222,12 +239,19 @@ private fun ConnectionsTab(repo: RuleRepository) {
                     ((label?.lowercase()?.contains(q) == true) || (pkg?.lowercase()?.contains(q) == true))
                 val visible = evs.filter { ev ->
                     val anno = annos[ev] ?: ConnAnno(Rule.ACTION_ALLOW, false)
-                    filterPass(anno, filter) && (q.isEmpty() || appHit || matchesText(ev, q))
+                    filterPass(anno, filter) && kindPass(ev, kind) &&
+                        (q.isEmpty() || appHit || matchesText(ev, q))
                 }
                 AppInfo(uid, label, pkg, evs) to visible
             }
             .filter { (_, visible) -> visible.isNotEmpty() }
-            .sortedBy { (app, _) -> (app.label ?: "~").lowercase() }
+            .let { list ->
+                when (sort) {
+                    ConnSort.Name -> list.sortedBy { (app, _) -> (app.label ?: "~").lowercase() }
+                    ConnSort.Busiest -> list.sortedByDescending { (app, _) -> app.events.size }
+                    ConnSort.Recent -> list.sortedByDescending { (app, _) -> app.events.maxOf { it.timeMs } }
+                }
+            }
     }
 
     val shown = groups.sumOf { it.second.size }
@@ -248,15 +272,34 @@ private fun ConnectionsTab(repo: RuleRepository) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             ConnFilter.values().forEach { f ->
-                FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f.label) })
+                FilterChip(
+                    selected = filter == f,
+                    onClick = { filter = f; settings.setConnFilter(f.name) },
+                    label = { Text(f.label) },
+                )
             }
         }
-        Text(
-            text = if (filtering) "showing $shown of ${events.size} · ${groups.size} app(s)"
-                else "${events.size} connection(s) · ${groups.size} app(s) · tap an app to expand",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(vertical = 8.dp),
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ConnKind.values().forEach { k ->
+                FilterChip(
+                    selected = kind == k,
+                    onClick = { kind = k; settings.setConnKind(k.name) },
+                    label = { Text(k.label) },
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (filtering) "showing $shown of ${events.size} · ${groups.size} app(s)"
+                    else "${events.size} connection(s) · ${groups.size} app(s) · tap to expand",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+            )
+            SortMenu(sort) { sort = it; settings.setConnSort(it.name) }
+        }
         if (groups.isEmpty()) {
             Text(
                 text = if (events.isEmpty()) "No connections captured yet."
@@ -306,6 +349,29 @@ private fun filterPass(anno: ConnAnno, filter: ConnFilter): Boolean = when (filt
     ConnFilter.Allowed -> anno.verdict != Rule.ACTION_DENY && !anno.isAd
     ConnFilter.Blocked -> anno.verdict == Rule.ACTION_DENY || anno.isAd
     ConnFilter.Ads -> anno.isAd
+}
+
+private fun kindPass(ev: ConnectionEvent, kind: ConnKind): Boolean = when (kind) {
+    ConnKind.Any -> true
+    ConnKind.TCP -> ev.protocol == L4.TCP
+    ConnKind.UDP -> ev.protocol == L4.UDP
+    ConnKind.DNS -> ev.dstPort == 53
+    ConnKind.HTTPS -> ev.dstPort == 443
+    ConnKind.HTTP -> ev.dstPort == 80
+}
+
+/** Compact "Sort: <x> ▾" dropdown for the connection-group ordering. */
+@Composable
+private fun SortMenu(sort: ConnSort, onPick: (ConnSort) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { open = true }) { Text("Sort: ${sort.label} ▾") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            ConnSort.values().forEach { s ->
+                DropdownMenuItem(text = { Text(s.label) }, onClick = { onPick(s); open = false })
+            }
+        }
+    }
 }
 
 @Composable
