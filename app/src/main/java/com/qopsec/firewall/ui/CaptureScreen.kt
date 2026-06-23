@@ -28,6 +28,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -81,6 +82,7 @@ fun CaptureScreen(
     val killed by CaptureLog.killed.collectAsStateWithLifecycle()
     val undoCount by repo.undoCount.collectAsStateWithLifecycle(initialValue = 0)
     var tab by remember { mutableStateOf(0) }
+    var searchOpen by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(16.dp)) {
@@ -142,16 +144,29 @@ fun CaptureScreen(
                 Switch(checked = killed, onCheckedChange = onKill, enabled = running)
             }
 
-            TabRow(selectedTabIndex = tab) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Connections") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Rules") })
-                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Trash") })
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TabRow(selectedTabIndex = tab, modifier = Modifier.weight(1f)) {
+                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Connections") })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Rules") })
+                    Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Trash") })
+                }
+                // Search toggle sits next to the tabs; only Connections is searchable. Tap to
+                // reveal the search/filter panel, tap again (or ✕) to give the list full height.
+                if (tab == 0) {
+                    IconButton(onClick = { searchOpen = !searchOpen }) {
+                        Text(
+                            if (searchOpen) "✕" else "🔍",
+                            color = if (searchOpen) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
 
             // weight(1f) bounds the tab content to the leftover height so its LazyColumn scrolls.
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when (tab) {
-                    0 -> ConnectionsTab(repo)
+                    0 -> ConnectionsTab(repo, searchOpen)
                     1 -> RulesTab(repo)
                     else -> TrashTab(repo)
                 }
@@ -186,7 +201,7 @@ private enum class ConnKind(val label: String) {
 private enum class ConnSort(val label: String) { Recent("Recent"), Name("Name"), Busiest("Busiest") }
 
 @Composable
-private fun ConnectionsTab(repo: RuleRepository) {
+private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
     val context = LocalContext.current
     val settings = remember { Settings.get(context) }
     val blockList = remember { BlockList.get(context) }
@@ -257,48 +272,54 @@ private fun ConnectionsTab(repo: RuleRepository) {
     val shown = groups.sumOf { it.second.size }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            label = { Text("Search apps, hosts, IPs, ports") },
-            trailingIcon = {
-                if (query.isNotEmpty()) TextButton(onClick = { query = "" }) { Text("✕") }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ConnFilter.values().forEach { f ->
-                FilterChip(
-                    selected = filter == f,
-                    onClick = { filter = f; settings.setConnFilter(f.name) },
-                    label = { Text(f.label) },
-                )
+        // The whole search/filter panel is hidden by default (toggled by the 🔍 next to the tabs)
+        // so the connection list gets the full screen height. Active filters still apply while
+        // collapsed — the count line shows "· filtered" so it's never a silent surprise.
+        if (searchOpen) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                label = { Text("Search apps, hosts, IPs, ports") },
+                trailingIcon = {
+                    if (query.isNotEmpty()) TextButton(onClick = { query = "" }) { Text("✕") }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ConnFilter.values().forEach { f ->
+                    FilterChip(
+                        selected = filter == f,
+                        onClick = { filter = f; settings.setConnFilter(f.name) },
+                        label = { Text(f.label) },
+                    )
+                }
             }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ConnKind.values().forEach { k ->
-                FilterChip(
-                    selected = kind == k,
-                    onClick = { kind = k; settings.setConnKind(k.name) },
-                    label = { Text(k.label) },
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ConnKind.values().forEach { k ->
+                    FilterChip(
+                        selected = kind == k,
+                        onClick = { kind = k; settings.setConnKind(k.name) },
+                        label = { Text(k.label) },
+                    )
+                }
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = if (filtering) "showing $shown of ${events.size} · ${groups.size} app(s)"
-                    else "${events.size} connection(s) · ${groups.size} app(s) · tap to expand",
+                text = if (filtering)
+                    "showing $shown of ${events.size} · ${groups.size} app(s) · filtered"
+                else "${events.size} connection(s) · ${groups.size} app(s)",
                 style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier.weight(1f).padding(vertical = 8.dp),
             )
-            SortMenu(sort) { sort = it; settings.setConnSort(it.name) }
+            if (searchOpen) SortMenu(sort) { sort = it; settings.setConnSort(it.name) }
         }
         if (groups.isEmpty()) {
             Text(
