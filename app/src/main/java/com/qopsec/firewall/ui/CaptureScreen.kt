@@ -18,12 +18,14 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,9 +53,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.ConnLog
 import com.qopsec.firewall.data.Rule
 import com.qopsec.firewall.data.RuleRepository
+import com.qopsec.firewall.data.Settings
 import com.qopsec.firewall.data.Snapshot
 import com.qopsec.firewall.data.TrashPurgeWorker
 import com.qopsec.firewall.vpn.CaptureLog
@@ -154,7 +158,7 @@ fun CaptureScreen(
     }
 }
 
-// --- Connections: grouped by app, expandable to per-destination sub-rows ---
+// --- Connections: searchable, filterable, grouped by app ---
 
 private data class AppInfo(
     val uid: Int,
@@ -165,48 +169,118 @@ private data class AppInfo(
 
 private class HostTarget(val app: AppInfo, val ev: ConnectionEvent)
 
+/** Per-flow annotation precomputed once so filtering + rows don't re-run the matcher. */
+private data class ConnAnno(val verdict: Int, val isAd: Boolean)
+
+private enum class ConnFilter(val label: String) {
+    All("All"), Allowed("Allowed"), Blocked("Blocked"), Ads("Ads & trackers")
+}
+
 @Composable
 private fun ConnectionsTab(repo: RuleRepository) {
+    val context = LocalContext.current
+    val settings = remember { Settings.get(context) }
+    val blockList = remember { BlockList.get(context) }
+
     // Durable history (survives restarts); updates live as new flows are recorded.
     val log by repo.connLog.collectAsStateWithLifecycle(initialValue = emptyList<ConnLog>())
     val events = remember(log) { log.map { it.toEvent() } }
     // Collected so badges recompute when rules change: each row shows the verdict the CURRENT
     // rules would give it, not the verdict from when it was first seen.
     val rules by repo.allRules.collectAsStateWithLifecycle(initialValue = emptyList<Rule>())
+    val adBlock by settings.adBlock.collectAsStateWithLifecycle()
+
     val expanded = remember { mutableStateMapOf<Int, Boolean>() }
     var hostDialog by remember { mutableStateOf<HostTarget?>(null) }
+    var query by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf(ConnFilter.All) }
 
-    val groups = remember(events) {
-        events.groupBy { it.uid }
-            .map { (uid, evs) ->
-                AppInfo(
-                    uid = uid,
-                    label = evs.firstNotNullOfOrNull { it.appLabel },
-                    packageName = evs.firstNotNullOfOrNull { it.packageName },
-                    events = evs,
-                )
-            }
-            .sortedBy { (it.label ?: "~").lowercase() }
+    // Precompute the rules-only verdict + the ad/tracker status (DNS blocklist) per flow, once,
+    // so neither the filter nor the rows re-run the matcher on every keystroke/recompose.
+    val annos = remember(events, rules, adBlock) {
+        events.associateWith { ev ->
+            val verdict = repo.decideIn(
+                rules, ev.uid, ev.packageName, protoNum(ev.protocol), ev.dstIp, ev.host, ev.dstPort,
+            ).action
+            val isAd = adBlock && ev.host?.let { blockList.isBlocked(it) } == true
+            ConnAnno(verdict, isAd)
+        }
     }
 
+    val filtering = query.isNotBlank() || filter != ConnFilter.All
+
+    // Groups are always built from ALL of an app's events (so the per-app status pill stays
+    // truthful); `visible` is the filtered subset shown when expanded. Apps with no visible
+    // child are dropped. A text hit on the app name shows all its (filter-passing) children.
+    val groups = remember(events, annos, query, filter) {
+        val q = query.trim().lowercase()
+        events.groupBy { it.uid }
+            .map { (uid, evs) ->
+                val label = evs.firstNotNullOfOrNull { it.appLabel }
+                val pkg = evs.firstNotNullOfOrNull { it.packageName }
+                val appHit = q.isNotEmpty() &&
+                    ((label?.lowercase()?.contains(q) == true) || (pkg?.lowercase()?.contains(q) == true))
+                val visible = evs.filter { ev ->
+                    val anno = annos[ev] ?: ConnAnno(Rule.ACTION_ALLOW, false)
+                    filterPass(anno, filter) && (q.isEmpty() || appHit || matchesText(ev, q))
+                }
+                AppInfo(uid, label, pkg, evs) to visible
+            }
+            .filter { (_, visible) -> visible.isNotEmpty() }
+            .sortedBy { (app, _) -> (app.label ?: "~").lowercase() }
+    }
+
+    val shown = groups.sumOf { it.second.size }
+
     Column(modifier = Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            label = { Text("Search apps, hosts, IPs, ports") },
+            trailingIcon = {
+                if (query.isNotEmpty()) TextButton(onClick = { query = "" }) { Text("✕") }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ConnFilter.values().forEach { f ->
+                FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f.label) })
+            }
+        }
         Text(
-            text = "${events.size} connection(s) · ${groups.size} app(s) · tap an app to expand",
+            text = if (filtering) "showing $shown of ${events.size} · ${groups.size} app(s)"
+                else "${events.size} connection(s) · ${groups.size} app(s) · tap an app to expand",
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier.padding(vertical = 8.dp),
         )
+        if (groups.isEmpty()) {
+            Text(
+                text = if (events.isEmpty()) "No connections captured yet."
+                    else "No connections match your search/filter.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            items(groups, key = { it.uid }) { g ->
+            items(groups, key = { it.first.uid }) { (app, visible) ->
                 AppGroupRow(
-                    app = g,
+                    app = app,
+                    visible = visible,
+                    annos = annos,
                     rules = rules,
                     repo = repo,
-                    expanded = expanded[g.uid] == true,
-                    onToggle = { expanded[g.uid] = !(expanded[g.uid] ?: false) },
-                    onChildClick = { ev -> hostDialog = HostTarget(g, ev) },
+                    // While filtering, force every result open so matches are visible at a glance.
+                    expanded = filtering || expanded[app.uid] == true,
+                    expandToggleable = !filtering,
+                    onToggle = { expanded[app.uid] = !(expanded[app.uid] ?: false) },
+                    onChildClick = { ev -> hostDialog = HostTarget(app, ev) },
                 )
             }
         }
@@ -215,29 +289,56 @@ private fun ConnectionsTab(repo: RuleRepository) {
     hostDialog?.let { t -> HostDialog(t, repo) { hostDialog = null } }
 }
 
+/** Substring match across the fields a user would search by. [q] is already lowercased. */
+private fun matchesText(ev: ConnectionEvent, q: String): Boolean {
+    if (q.isEmpty()) return true
+    if (ev.host?.lowercase()?.contains(q) == true) return true
+    if (ev.dstIp.lowercase().contains(q)) return true
+    if (ev.appLabel?.lowercase()?.contains(q) == true) return true
+    if (ev.packageName?.lowercase()?.contains(q) == true) return true
+    if (ev.dstPort.toString().contains(q)) return true
+    return ev.protocol.name.lowercase().contains(q)
+}
+
+private fun filterPass(anno: ConnAnno, filter: ConnFilter): Boolean = when (filter) {
+    ConnFilter.All -> true
+    // "effectively blocked" = a deny rule OR the ad-block backstop (rule verdict alone misses ads).
+    ConnFilter.Allowed -> anno.verdict != Rule.ACTION_DENY && !anno.isAd
+    ConnFilter.Blocked -> anno.verdict == Rule.ACTION_DENY || anno.isAd
+    ConnFilter.Ads -> anno.isAd
+}
+
 @Composable
 private fun AppGroupRow(
     app: AppInfo,
+    visible: List<ConnectionEvent>,
+    annos: Map<ConnectionEvent, ConnAnno>,
     rules: List<Rule>,
     repo: RuleRepository,
     expanded: Boolean,
+    expandToggleable: Boolean,
     onToggle: () -> Unit,
     onChildClick: (ConnectionEvent) -> Unit,
 ) {
     // Whole-app verdict (app/global rules only — no host/ip/port/proto matcher).
     val appVerdict = repo.decideIn(rules, app.uid, app.packageName, 0, "", null, 0).action
     val blocked = app.events.count {
-        repo.decideIn(rules, it.uid, it.packageName, protoNum(it.protocol), it.dstIp, it.host, it.dstPort)
-            .action == Rule.ACTION_DENY
+        val a = annos[it]
+        a != null && (a.verdict == Rule.ACTION_DENY || a.isAd)
     }
     val status = appStatus(appVerdict, blocked, app.events.size)
 
     StatusCard(status.color()) {
         Row(
-            modifier = Modifier.fillMaxWidth().clickable { onToggle() }.padding(12.dp),
+            modifier = Modifier.fillMaxWidth()
+                .let { if (expandToggleable) it.clickable { onToggle() } else it }
+                .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(if (expanded) "▾" else "▸", modifier = Modifier.padding(end = 10.dp))
+            Text(
+                if (expandToggleable) (if (expanded) "▾" else "▸") else "•",
+                modifier = Modifier.padding(end = 10.dp),
+            )
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = app.label ?: "unknown",
@@ -266,21 +367,24 @@ private fun AppGroupRow(
         }
 
         if (expanded) {
-            app.events.forEach { ev ->
-                val v = repo.decideIn(
-                    rules, ev.uid, ev.packageName, protoNum(ev.protocol),
-                    ev.dstIp, ev.host, ev.dstPort,
-                ).action
-                ChildRow(ev, v, onClick = { onChildClick(ev) })
+            visible.forEach { ev ->
+                val anno = annos[ev] ?: ConnAnno(Rule.ACTION_ALLOW, false)
+                ChildRow(ev, anno, onClick = { onChildClick(ev) })
             }
         }
     }
 }
 
 @Composable
-private fun ChildRow(ev: ConnectionEvent, verdict: Int, onClick: () -> Unit) {
-    val status = verdictStatus(verdict)
-    val statusColor = status.color()
+private fun ChildRow(ev: ConnectionEvent, anno: ConnAnno, onClick: () -> Unit) {
+    val palette = LocalStatusPalette.current
+    // An ad-blocked flow is effectively blocked even when no user rule denies it — surface that
+    // honestly instead of the rules-only "Allowed" the matcher would report.
+    val (label, statusColor) = when {
+        anno.verdict == Rule.ACTION_DENY -> FwStatus.Blocked.label to palette.blocked
+        anno.isAd -> "Ad-blocked" to palette.blocked
+        else -> FwStatus.Allowed.label to palette.allowed
+    }
     Row(
         modifier = Modifier.fillMaxWidth().clickable { onClick() }
             .drawBehind { drawRect(color = statusColor, size = Size(3.dp.toPx(), size.height)) }
@@ -297,7 +401,7 @@ private fun ChildRow(ev: ConnectionEvent, verdict: Int, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        StatusPill(status)
+        Pill(label, statusColor)
     }
 }
 
