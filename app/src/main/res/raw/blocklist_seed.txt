@@ -1,0 +1,55 @@
+# Q opsec firewall — bundled starter ad/tracker blocklist (domain-level).
+# Format: one domain per line; "0.0.0.0 domain", "||domain^" and "# comment" also accepted.
+# Subdomains are covered automatically (e.g. doubleclick.net blocks ad.doubleclick.net).
+# This is a small curated seed; full subscribable lists (StevenBlack/OISD/EasyList) come next.
+
+# --- Google ads / analytics ---
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+google-analytics.com
+googletagmanager.com
+googletagservices.com
+app-measurement.com
+admob.com
+pagead2.googlesyndication.com
+
+# --- Major ad exchanges / SSPs ---
+adnxs.com
+adsrvr.org
+rubiconproject.com
+pubmatic.com
+openx.net
+casalemedia.com
+smartadserver.com
+bidswitch.net
+33across.com
+criteo.com
+criteo.net
+
+# --- Mobile ad SDKs ---
+amazon-adsystem.com
+applovin.com
+adcolony.com
+mopub.com
+inmobi.com
+chartboost.com
+vungle.com
+ironsource.com
+supersonicads.com
+unityads.unity3d.com
+moloco.com
+
+# --- Trackers / analytics / attribution ---
+scorecardresearch.com
+moatads.com
+adsafeprotected.com
+taboola.com
+outbrain.com
+flurry.com
+mixpanel.com
+amplitude.com
+appsflyer.com
+adjust.com
+kochava.com
+branch.io

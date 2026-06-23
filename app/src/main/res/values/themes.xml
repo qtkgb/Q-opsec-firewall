@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base platform theme; actual UI colors come from Compose MaterialTheme. -->
+    <style name="Theme.QOpsecFirewall" parent="android:Theme.DeviceDefault.NoActionBar" />
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Q opsec firewall</string>
+    <string name="channel_name">Capture status</string>
+    <string name="prompt_channel_name">Connection prompts</string>
+    <string name="notif_title">Firewall active</string>
+    <string name="notif_text">Forwarding traffic and watching connections</string>
+    <string name="notif_text_paused">Observing connections (traffic paused — core not built)</string>
+</resources>

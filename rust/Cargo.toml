@@ -1,0 +1,31 @@
+[package]
+name = "firewall_core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "firewall_core"
+# cdylib -> libfirewall_core.so for Android; loaded via System.loadLibrary("firewall_core")
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+# Forwarding datapath: a tun2socks-style netstack on smoltcp hands us per-flow
+# TcpStream / UdpSocket for arbitrary destinations; we relay each to a protect()ed
+# OS socket. tokio drives the async relays; futures gives Stream/Sink.
+netstack-smoltcp = "0.2"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+futures = "0.3"
+libc = "0.2"
+log = "0.4"
+android_logger = "0.14"
+# "log" feature bridges netstack-smoltcp's `tracing` events into `log` -> android_logger,
+# so they show up in `adb logcat -s firewall_core`.
+tracing = { version = "0.1", features = ["log"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+strip = true
