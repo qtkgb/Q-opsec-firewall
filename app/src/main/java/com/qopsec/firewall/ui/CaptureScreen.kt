@@ -226,6 +226,7 @@ private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
     var sort by remember {
         mutableStateOf(runCatching { ConnSort.valueOf(settings.connSort()) }.getOrDefault(ConnSort.Recent))
     }
+    var confirmBlockAll by remember { mutableStateOf(false) }
 
     // Precompute the rules-only verdict + the ad/tracker status (DNS blocklist) per flow, once,
     // so neither the filter nor the rows re-run the matcher on every keystroke/recompose.
@@ -270,6 +271,12 @@ private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
     }
 
     val shown = groups.sumOf { it.second.size }
+    // Deduped destinations behind the visible rows — one deny rule each for "Block all shown".
+    val targets = remember(groups) {
+        groups.flatMap { (app, visible) ->
+            visible.map { ev -> RuleRepository.DestTarget(app.uid, app.packageName, app.label, ev.host, ev.dstIp) }
+        }.distinctBy { it.uid to (it.host ?: it.ip) }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // The whole search/filter panel is hidden by default (toggled by the 🔍 next to the tabs)
@@ -308,6 +315,13 @@ private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
                         onClick = { kind = k; settings.setConnKind(k.name) },
                         label = { Text(k.label) },
                     )
+                }
+            }
+            // Bulk action on the filtered set — e.g. pick "Ads & trackers", then block them all.
+            // Only offered while filtering, so it can never block the whole unfiltered list by accident.
+            if (filtering && targets.isNotEmpty()) {
+                TextButton(onClick = { confirmBlockAll = true }, modifier = Modifier.padding(top = 2.dp)) {
+                    Text("Block all shown (${targets.size})", color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -351,6 +365,25 @@ private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
     }
 
     hostDialog?.let { t -> HostDialog(t, repo) { hostDialog = null } }
+
+    if (confirmBlockAll) {
+        AlertDialog(
+            onDismissRequest = { confirmBlockAll = false },
+            title = { Text("Block all shown?") },
+            text = {
+                Text(
+                    "Create deny rules for ${targets.size} destination(s) across ${groups.size} " +
+                        "app(s). You can revert with Undo or restore them from Trash.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { repo.blockAllDest(targets); confirmBlockAll = false }) {
+                    Text("Block all", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmBlockAll = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 /** Substring match across the fields a user would search by. [q] is already lowercased. */

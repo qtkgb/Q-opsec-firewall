@@ -258,6 +258,46 @@ class RuleRepository private constructor(private val dao: RuleDao) {
         }
     }
 
+    /** One destination to bulk-block: app identity + the host (preferred) or raw IP. */
+    data class DestTarget(
+        val uid: Int,
+        val packageName: String?,
+        val label: String?,
+        val host: String?,
+        val ip: String,
+    )
+
+    /**
+     * Bulk-block every destination in [targets] as per-app host/ip deny rules, all under ONE
+     * batch so a single Undo (or Trash restore) reverts the whole action. Replaces any existing
+     * matching dest rule for each target. Used by the Connections "Block all shown" action.
+     */
+    fun blockAllDest(targets: List<DestTarget>) = scope.launch {
+        if (targets.isEmpty()) return@launch
+        val batch = newBatch()
+        val existing = dao.allOnce().filter { it.deletedAt == null }
+        targets.forEach { t ->
+            existing.filter {
+                it.matchesApp(t.uid, t.packageName) &&
+                    if (t.host != null) it.host == t.host else (it.ip == t.ip && it.host == null)
+            }.forEach { jHardDelete(it, batch) }
+            jInsert(
+                Rule(
+                    scope = if (t.host != null) "host" else "ip",
+                    packageName = t.packageName,
+                    appUid = t.uid.takeIf { it >= 0 },
+                    appLabel = t.label,
+                    host = t.host,
+                    ip = if (t.host == null) t.ip else null,
+                    action = Rule.ACTION_DENY,
+                    priority = 10,
+                    origin = "user",
+                ),
+                batch,
+            )
+        }
+    }
+
     /** Revert the most recent user action (the whole batch), then drop its journal entries. */
     fun undoLast() = scope.launch {
         val latest = dao.latestChange() ?: return@launch
