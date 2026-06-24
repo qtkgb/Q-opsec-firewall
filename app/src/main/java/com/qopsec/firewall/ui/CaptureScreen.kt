@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -52,10 +53,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.qopsec.firewall.R
 import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.ConnLog
 import com.qopsec.firewall.data.Rule
@@ -106,58 +109,42 @@ fun CaptureScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (killed) LocalStatusPalette.current.blocked else MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text(
-                text = "core: " + remember { NativeBridge.status() },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
 
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Button(onClick = { if (running) onStop() else onStart() }) {
                     Text(if (running) "Stop" else "Start")
                 }
                 OutlinedButton(onClick = { repo.clearConn() }) { Text("Clear") }
                 OutlinedButton(onClick = { repo.undoLast() }, enabled = undoCount > 0) { Text("Undo") }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "Kill switch",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (killed) LocalStatusPalette.current.blocked else MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = "Block all traffic instantly (tunnel stays up)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = killed, onCheckedChange = onKill, enabled = running)
+                Spacer(modifier = Modifier.weight(1f))
+                KillToggle(killed = killed, enabled = running, onToggle = onKill)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TabRow(selectedTabIndex = tab, modifier = Modifier.weight(1f)) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Connections") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Rules") })
-                    Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Trash") })
+                    val tabBlue = MaterialTheme.colorScheme.primary
+                    Tab(selected = tab == 0, onClick = { tab = 0 }, icon = {
+                        Icon(painterResource(R.drawable.ic_tab_connections), contentDescription = "Connections", tint = tabBlue)
+                    })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, icon = {
+                        Icon(painterResource(R.drawable.ic_tab_rules), contentDescription = "Rules", tint = tabBlue)
+                    })
+                    Tab(selected = tab == 2, onClick = { tab = 2 }, icon = {
+                        Icon(painterResource(R.drawable.ic_tab_trash), contentDescription = "Trash", tint = tabBlue)
+                    })
                 }
                 // Search toggle sits next to the tabs; only Connections is searchable. Tap to
                 // reveal the search/filter panel, tap again (or ✕) to give the list full height.
                 if (tab == 0) {
                     IconButton(onClick = { searchOpen = !searchOpen }) {
-                        Text(
-                            if (searchOpen) "✕" else "🔍",
-                            color = if (searchOpen) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        Icon(
+                            painterResource(if (searchOpen) R.drawable.ic_close else R.drawable.ic_search),
+                            contentDescription = if (searchOpen) "Close search" else "Search",
+                            tint = MaterialTheme.colorScheme.primary,
                         )
                     }
                 }
@@ -172,6 +159,41 @@ fun CaptureScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * Compact kill-switch toggle that lives in the action row next to Undo.
+ * Inactive = grey pill + grey dot; active = red pill + white dot. The word "KILL"
+ * sits inside the pill (no separate label). Disabled (firewall stopped) dims it.
+ */
+@Composable
+private fun KillToggle(killed: Boolean, enabled: Boolean, onToggle: (Boolean) -> Unit) {
+    val blocked = LocalStatusPalette.current.blocked
+    val bg = if (killed) blocked else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (killed) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+    val alpha = if (enabled) 1f else 0.4f
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(bg.copy(alpha = alpha))
+            .clickable(enabled = enabled) { onToggle(!killed) }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .clip(CircleShape)
+                .background((if (killed) Color.White else fg).copy(alpha = alpha)),
+        )
+        Text(
+            "KILL",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = fg.copy(alpha = alpha),
+        )
     }
 }
 

@@ -18,15 +18,13 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textStyle="bold"
-            android:textSize="14sp"
-            android:textColor="?android:attr/textColorPrimary" />
+            style="@style/TextAppearance.Compat.Notification.Title" />
 
         <TextView
             android:id="@+id/notif_text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textColor="?android:attr/textColorSecondary" />
+            style="@style/TextAppearance.Compat.Notification.Line2" />
     </LinearLayout>
 
     <TextView

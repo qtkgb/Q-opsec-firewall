@@ -46,7 +46,7 @@ object NativeBridge {
     var blockHostChecker: ((host: String) -> Boolean)? = null
 
     private external fun nativeVersion(): String
-    external fun nativeStart(tunFd: Int): Long
+    external fun nativeStart(tunFd: Int, debug: Boolean): Long
     external fun nativeStop(handle: Long)
     external fun nativeSetMode(handle: Long, mode: Int)
 

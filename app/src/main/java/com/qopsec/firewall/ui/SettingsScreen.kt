@@ -1,6 +1,7 @@
 package com.qopsec.firewall.ui
 
 import android.content.Intent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -30,9 +32,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -45,7 +49,12 @@ import com.qopsec.firewall.data.BlocklistManager
 import com.qopsec.firewall.data.LockStore
 import com.qopsec.firewall.data.Settings
 import com.qopsec.firewall.data.ThemeMode
+import com.qopsec.firewall.data.UpdateCheckWorker
+import com.qopsec.firewall.data.UpdateManager
+import com.qopsec.firewall.data.UpdateState
 import com.qopsec.firewall.data.UserDomains
+import com.qopsec.firewall.vpn.NativeBridge
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
@@ -67,6 +76,11 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
     val allowList by userDomains.allow.collectAsStateWithLifecycle()
     // Re-read the merged total whenever any contributing list changes so the count recomposes.
     val blockCount = remember(sourceState, customBlock, allowList) { BlockList.get(context).size }
+    val updateMgr = remember { UpdateManager.get(context) }
+    val autoUpdate by settings.autoUpdateCheck.collectAsStateWithLifecycle()
+    val updateAvailable by updateMgr.available.collectAsStateWithLifecycle()
+    val updateState by updateMgr.state.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     var showSet by remember { mutableStateOf(false) }
     var showDisable by remember { mutableStateOf(false) }
 
@@ -235,6 +249,77 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
             )
 
             Spacer(Modifier.height(22.dp))
+            ToggleRow(
+                title = "Check for updates daily",
+                subtitle = "Installed v${updateMgr.currentVersion()} · checks GitHub releases",
+                checked = autoUpdate,
+                onChange = {
+                    settings.setAutoUpdateCheck(it)
+                    UpdateCheckWorker.schedule(context, it)
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    enabled = updateState !is UpdateState.Checking &&
+                        updateState !is UpdateState.Downloading,
+                    onClick = { scope.launch { updateMgr.checkForUpdate() } },
+                ) { Text("Check now") }
+                Spacer(Modifier.width(12.dp))
+                val statusText = when (val s = updateState) {
+                    is UpdateState.Checking -> "Checking…"
+                    is UpdateState.UpToDate -> "Up to date"
+                    is UpdateState.Downloading -> "Downloading ${s.percent}%"
+                    is UpdateState.Error -> s.message
+                    is UpdateState.Idle -> ""
+                }
+                if (statusText.isNotEmpty()) {
+                    Text(
+                        statusText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (updateState is UpdateState.Error)
+                            MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            updateAvailable?.let { info ->
+                Spacer(Modifier.height(12.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(14.dp),
+                ) {
+                    Text(
+                        "Update available — v${info.version}",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (info.notes.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            info.notes.trim().take(300),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        enabled = updateState !is UpdateState.Downloading,
+                        onClick = { scope.launch { updateMgr.downloadAndInstall(info) } },
+                    ) {
+                        Text(
+                            if (updateState is UpdateState.Downloading)
+                                "Downloading ${(updateState as UpdateState.Downloading).percent}%"
+                            else "Download & install",
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(22.dp))
             Text("Theme", style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -242,6 +327,13 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
                 ThemeChip("Light", themeMode == ThemeMode.LIGHT) { settings.setThemeMode(ThemeMode.LIGHT) }
                 ThemeChip("Dark", themeMode == ThemeMode.DARK) { settings.setThemeMode(ThemeMode.DARK) }
             }
+
+            Spacer(Modifier.height(28.dp))
+            Text(
+                text = "core: " + remember { NativeBridge.status() },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 

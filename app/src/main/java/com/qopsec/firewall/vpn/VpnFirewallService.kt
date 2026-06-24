@@ -16,6 +16,7 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
+import com.qopsec.firewall.BuildConfig
 import com.qopsec.firewall.MainActivity
 import com.qopsec.firewall.R
 import com.qopsec.firewall.data.BlockList
@@ -195,7 +196,7 @@ class VpnFirewallService : VpnService() {
         UserDomains.get(this)        // ensure custom-block + allowlist exceptions are merged too
         // detachFd transfers ownership: the PFD won't close the fd; the core will.
         val fd = pfd.detachFd()
-        nativeHandle = NativeBridge.nativeStart(fd)
+        nativeHandle = NativeBridge.nativeStart(fd, BuildConfig.DEBUG)
         if (nativeHandle == 0L) {
             // Native start failed: we already gave up the fd, so just stop cleanly.
             stopCapture()

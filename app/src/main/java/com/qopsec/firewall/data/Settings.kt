@@ -45,6 +45,10 @@ class Settings private constructor(context: Context) {
     private val _dnsResolver = MutableStateFlow(prefs.getString(KEY_DNS, DEFAULT_DNS) ?: DEFAULT_DNS)
     val dnsResolver: StateFlow<String> = _dnsResolver.asStateFlow()
 
+    /** When true, a daily WorkManager job checks GitHub for a newer release. Default on. */
+    private val _autoUpdateCheck = MutableStateFlow(prefs.getBoolean(KEY_AUTOUPDATE, true))
+    val autoUpdateCheck: StateFlow<Boolean> = _autoUpdateCheck.asStateFlow()
+
     private val _themeMode = MutableStateFlow(
         runCatching { ThemeMode.valueOf(prefs.getString(KEY_THEME, ThemeMode.SYSTEM.name)!!) }
             .getOrDefault(ThemeMode.SYSTEM),
@@ -59,6 +63,11 @@ class Settings private constructor(context: Context) {
     fun setBootLock(value: Boolean) {
         prefs.edit().putBoolean(KEY_BOOT, value).apply()
         _bootLock.value = value
+    }
+
+    fun setAutoUpdateCheck(value: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTOUPDATE, value).apply()
+        _autoUpdateCheck.value = value
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -98,6 +107,7 @@ class Settings private constructor(context: Context) {
         private const val KEY_ADBLOCK = "ad_block"
         private const val KEY_ENCDNS = "block_encrypted_dns"
         private const val KEY_DNS = "dns_resolver"
+        private const val KEY_AUTOUPDATE = "auto_update_check"
         private const val KEY_CFILTER = "conn_filter"
         private const val KEY_CKIND = "conn_kind"
         private const val KEY_CSORT = "conn_sort"

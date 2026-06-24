@@ -33,6 +33,7 @@ import com.qopsec.firewall.data.BlocklistUpdateWorker
 import com.qopsec.firewall.data.LockStore
 import com.qopsec.firewall.data.Settings
 import com.qopsec.firewall.data.TrashPurgeWorker
+import com.qopsec.firewall.data.UpdateCheckWorker
 import com.qopsec.firewall.ui.CaptureScreen
 import com.qopsec.firewall.ui.FirewallTheme
 import com.qopsec.firewall.ui.LockScreen
@@ -66,10 +67,12 @@ class MainActivity : FragmentActivity() {
         scheduleTrashPurge()
         BlocklistManager.get(this)   // load cached blocklists into the matcher
         scheduleBlocklistUpdate()
+        UpdateCheckWorker.schedule(this, appSettings.autoUpdateCheck.value)
+        val openUpdate = intent?.getBooleanExtra(UpdateCheckWorker.EXTRA_SHOW_UPDATE, false) == true
         setContent {
             val themeMode by appSettings.themeMode.collectAsStateWithLifecycle()
             FirewallTheme(themeMode = themeMode) {
-                var showSettings by remember { mutableStateOf(false) }
+                var showSettings by remember { mutableStateOf(openUpdate) }
                 var showPerApp by remember { mutableStateOf(false) }
                 val isLocked by locked
                 when {

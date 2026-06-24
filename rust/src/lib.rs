@@ -148,8 +148,9 @@ pub extern "system" fn Java_com_qopsec_firewall_vpn_NativeBridge_nativeStart<'lo
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     tun_fd: jint,
+    debug: jni::sys::jboolean,
 ) -> jlong {
-    init_log();
+    init_log(debug != 0);
 
     // Cache JVM + the NativeBridge class (must happen on this Java thread).
     if let Ok(vm) = env.get_java_vm() {
@@ -1074,12 +1075,18 @@ fn skip_dns_name(buf: &[u8], start: usize) -> Option<usize> {
     read_dns_name(buf, start).map(|(_, p)| p)
 }
 
-fn init_log() {
+fn init_log(debug: bool) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // Gated on the APP's build type (BuildConfig.DEBUG, passed from Kotlin) — NOT the .so's
+        // compile profile, since cargo-ndk always builds the .so with --release. Debug app builds
+        // log everything to logcat for development; RELEASE builds stay SILENT. The core logs
+        // connection destinations/hostnames at Debug level, which must never leak to logcat on a
+        // buddy's phone. Off = no native log records emitted at all.
+        let level = if debug { log::LevelFilter::Debug } else { log::LevelFilter::Off };
         android_logger::init_once(
             android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Debug)
+                .with_max_level(level)
                 .with_tag("firewall_core"),
         );
     });
