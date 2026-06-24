@@ -35,10 +35,11 @@ object LogExporter {
             w.write("captured ${Date()}\n")
             w.write("----------------------------------------\n")
             // `-d` dumps the buffer and exits. An app may only read its OWN logs, so this is just
-            // our process. Filter to our two tags (Info+) to keep it focused + metadata-free.
+            // our process. Filter to our two tags. DEBUG level (ad-block leak investigation) so the
+            // per-connection sinkhole/SNI/decide lines (with hostnames) are included.
             runCatching {
                 val proc = Runtime.getRuntime().exec(
-                    arrayOf("logcat", "-d", "-v", "time", "firewall_core:I", "qopsec_fw:I", "*:S"),
+                    arrayOf("logcat", "-d", "-v", "time", "firewall_core:D", "qopsec_fw:D", "*:S"),
                 )
                 proc.inputStream.bufferedReader().forEachLine { line ->
                     w.write(line); w.write("\n")

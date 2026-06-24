@@ -1111,13 +1111,13 @@ fn init_log(debug: bool) {
         // connection destinations/hostnames at Debug level, which must never leak to logcat on a
         // buddy's phone. Off = no native log records emitted at all.
         //
-        // ⚠️ TEMPORARY DIAGNOSTIC (stop-hang investigation 2026-06-24): forced ON regardless of
-        // build type so we capture the teardown trail even on a release/sideload build. INFO level
-        // only — the lifecycle/teardown logs are info!, while per-connection destinations/hosts are
-        // debug! and stay OUT (so a shipped build + the in-app log export leak no browsing metadata).
-        // REVERT to `if debug { Debug } else { Off }` once the stop bug is fixed.
+        // ⚠️ TEMPORARY DIAGNOSTIC (ad-block leak investigation 2026-06-25): forced to DEBUG regardless
+        // of build type so the in-app log export captures the per-connection sinkhole / SNI / deny
+        // decisions WITH HOSTNAMES — needed to name exactly which ad domains slip through. NOTE: this
+        // means a shipped build logs browsing destinations to logcat; that's the whole point of this
+        // throwaway build. REVERT to `if debug { Debug } else { Off }` once the leak is understood.
         let _ = debug;
-        let level = log::LevelFilter::Info;
+        let level = log::LevelFilter::Debug;
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(level)

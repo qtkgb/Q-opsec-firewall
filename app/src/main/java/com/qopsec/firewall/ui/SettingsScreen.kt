@@ -347,8 +347,8 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
             Spacer(Modifier.height(22.dp))
             Text("Diagnostics", style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = "Capture the firewall start/stop log and share it (for debugging the stop issue). " +
-                    "Reproduce first: Start → use the phone a bit → Stop, then save the log.",
+                text = "Capture the firewall log and share it. To debug ad leaks: Start the firewall, " +
+                    "open the site where ads show, let it load, then come here and save the log.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

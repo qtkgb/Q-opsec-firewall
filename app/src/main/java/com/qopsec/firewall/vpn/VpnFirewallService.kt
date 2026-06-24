@@ -330,6 +330,15 @@ class VpnFirewallService : VpnService() {
             }
         }
 
+        // ⚠️ TEMPORARY DIAGNOSTIC (ad-block leak investigation 2026-06-25): name every flow's host +
+        // verdict so we can see which ad domains leak and why (onList=false → not on a blocklist;
+        // host=- → no DNS/SNI to match on, e.g. QUIC). Remove with the rest of the instrumentation.
+        Log.d(
+            TAG,
+            "decide $l4 $dstIp:$dstPort host=${host ?: "-"} pkg=${pkg ?: "-"} " +
+                "adBlock=$adBlockActive onList=${host != null && blockList.isBlocked(host)} verdict=$action",
+        )
+
         scope.launch {
             rules.recordConn(
                 ConnLog(
