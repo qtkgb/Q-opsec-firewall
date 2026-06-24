@@ -214,9 +214,11 @@ class VpnFirewallService : VpnService() {
             return
         }
 
-        // Gate IPv6 forwarding on real v6 egress, and keep it updated as networks change.
+        // Gate IPv6 forwarding on the user's opt-in AND real v6 egress; keep it updated as
+        // networks change and re-apply live when the user flips the setting.
         updateIpv6()
         registerNetworkCallback()
+        scope.launch { settings.forwardIpv6.collect { updateIpv6() } }
 
         // Re-evaluate live flows whenever the rule set changes, so a block/allow takes
         // effect on already-open connections instantly (not just on the next new flow).
@@ -277,7 +279,9 @@ class VpnFirewallService : VpnService() {
     /** Re-detect v6 egress and push to the core only when it changes (new flows follow it). */
     private fun updateIpv6() {
         if (!running || nativeHandle == 0L) return
-        val v6 = hasGlobalIpv6()
+        // Only forward v6 if the user opted in (default off) AND a global v6 address is present.
+        // Default off ⇒ v6 dropped at the netstack ⇒ apps fall back to IPv4 (the reliable path).
+        val v6 = settings.forwardIpv6.value && hasGlobalIpv6()
         if (v6 != ipv6Fwd) {
             ipv6Fwd = v6
             NativeBridge.nativeSetIpv6(v6)

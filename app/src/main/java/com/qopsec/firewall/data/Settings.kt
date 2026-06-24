@@ -45,6 +45,15 @@ class Settings private constructor(context: Context) {
     private val _dnsResolver = MutableStateFlow(prefs.getString(KEY_DNS, DEFAULT_DNS) ?: DEFAULT_DNS)
     val dnsResolver: StateFlow<String> = _dnsResolver.asStateFlow()
 
+    /**
+     * Forward IPv6 traffic through the relay. DEFAULT OFF: v6 is dropped at the netstack so apps
+     * fall back to IPv4 (the proven path). Many mobile networks ADVERTISE a global v6 address but
+     * can't actually route it for our protected sockets (connect → ENETUNREACH), which breaks
+     * v6-preferring apps like WhatsApp. Only enable on a network with genuinely working IPv6.
+     */
+    private val _forwardIpv6 = MutableStateFlow(prefs.getBoolean(KEY_FWD_V6, false))
+    val forwardIpv6: StateFlow<Boolean> = _forwardIpv6.asStateFlow()
+
     /** When true, a daily WorkManager job checks GitHub for a newer release. Default on. */
     private val _autoUpdateCheck = MutableStateFlow(prefs.getBoolean(KEY_AUTOUPDATE, true))
     val autoUpdateCheck: StateFlow<Boolean> = _autoUpdateCheck.asStateFlow()
@@ -91,6 +100,11 @@ class Settings private constructor(context: Context) {
         _dnsResolver.value = ip
     }
 
+    fun setForwardIpv6(value: Boolean) {
+        prefs.edit().putBoolean(KEY_FWD_V6, value).apply()
+        _forwardIpv6.value = value
+    }
+
     // --- Connections view: persisted status/kind/sort (plain strings; Compose holds the live
     // state, these just survive app restarts). Values are enum .name; callers tolerate bad reads.
     fun connFilter(): String = prefs.getString(KEY_CFILTER, "All") ?: "All"
@@ -107,6 +121,7 @@ class Settings private constructor(context: Context) {
         private const val KEY_ADBLOCK = "ad_block"
         private const val KEY_ENCDNS = "block_encrypted_dns"
         private const val KEY_DNS = "dns_resolver"
+        private const val KEY_FWD_V6 = "forward_ipv6"
         private const val KEY_AUTOUPDATE = "auto_update_check"
         private const val KEY_CFILTER = "conn_filter"
         private const val KEY_CKIND = "conn_kind"

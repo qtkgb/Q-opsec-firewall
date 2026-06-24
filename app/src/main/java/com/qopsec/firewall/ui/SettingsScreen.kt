@@ -72,6 +72,7 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
     val adBlock by settings.adBlock.collectAsStateWithLifecycle()
     val blockEncDns by settings.blockEncryptedDns.collectAsStateWithLifecycle()
     val dnsResolver by settings.dnsResolver.collectAsStateWithLifecycle()
+    val forwardIpv6 by settings.forwardIpv6.collectAsStateWithLifecycle()
     val blockMgr = remember { BlocklistManager.get(context) }
     val sourceState by blockMgr.state.collectAsStateWithLifecycle()
     val userDomains = remember { UserDomains.get(context) }
@@ -249,6 +250,16 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
             DnsResolverSection(
                 current = dnsResolver,
                 onSet = { settings.setDnsResolver(it) },
+            )
+
+            Spacer(Modifier.height(16.dp))
+            ToggleRow(
+                title = "Forward IPv6 (experimental)",
+                subtitle = "Off = IPv4 only (recommended). Some networks advertise IPv6 but can't " +
+                    "route it, which breaks apps like WhatsApp. Enable only if your network has " +
+                    "working IPv6.",
+                checked = forwardIpv6,
+                onChange = { settings.setForwardIpv6(it) },
             )
 
             Spacer(Modifier.height(22.dp))
