@@ -184,6 +184,8 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun stopCaptureService() {
+        // ⚠️ TEMPORARY DIAGNOSTIC (stop-hang investigation 2026-06-24): remove once fixed.
+        android.util.Log.i("qopsec_fw", "MainActivity.stopCaptureService: user tapped Stop -> sending ACTION_STOP")
         startService(
             Intent(this, VpnFirewallService::class.java).setAction(VpnFirewallService.ACTION_STOP)
         )

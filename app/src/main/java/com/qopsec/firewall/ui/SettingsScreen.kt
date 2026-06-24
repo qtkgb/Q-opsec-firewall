@@ -47,6 +47,7 @@ import com.qopsec.firewall.data.BiometricAuth
 import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.BlocklistManager
 import com.qopsec.firewall.data.LockStore
+import com.qopsec.firewall.data.LogExporter
 import com.qopsec.firewall.data.Settings
 import com.qopsec.firewall.data.ThemeMode
 import com.qopsec.firewall.data.UpdateCheckWorker
@@ -54,7 +55,9 @@ import com.qopsec.firewall.data.UpdateManager
 import com.qopsec.firewall.data.UpdateState
 import com.qopsec.firewall.data.UserDomains
 import com.qopsec.firewall.vpn.NativeBridge
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
@@ -327,6 +330,30 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
                 ThemeChip("Light", themeMode == ThemeMode.LIGHT) { settings.setThemeMode(ThemeMode.LIGHT) }
                 ThemeChip("Dark", themeMode == ThemeMode.DARK) { settings.setThemeMode(ThemeMode.DARK) }
             }
+
+            // TEMPORARY DIAGNOSTIC (stop-hang investigation): capture + share this app's start/stop
+            // log straight from the phone (no adb). Remove with the rest of the instrumentation.
+            Spacer(Modifier.height(22.dp))
+            Text("Diagnostics", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "Capture the firewall start/stop log and share it (for debugging the stop issue). " +
+                    "Reproduce first: Start → use the phone a bit → Stop, then save the log.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            var savingLog by remember { mutableStateOf(false) }
+            OutlinedButton(
+                enabled = !savingLog,
+                onClick = {
+                    savingLog = true
+                    scope.launch {
+                        val f = withContext(Dispatchers.IO) { LogExporter.capture(context) }
+                        savingLog = false
+                        LogExporter.share(context, f)
+                    }
+                },
+            ) { Text(if (savingLog) "Saving…" else "Save & share log") }
 
             Spacer(Modifier.height(28.dp))
             Text(

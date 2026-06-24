@@ -205,14 +205,23 @@ pub extern "system" fn Java_com_qopsec_firewall_vpn_NativeBridge_nativeStop<'loc
     if handle == 0 {
         return;
     }
+    log::info!("nativeStop: ENTER handle={handle}");
     let mut engine = unsafe { Box::from_raw(handle as *mut Engine) };
     if let Some(tx) = engine.stop_tx.take() {
-        let _ = tx.send(());
+        log::info!("nativeStop: sending stop signal");
+        let r = tx.send(());
+        log::info!("nativeStop: stop signal sent (ok={})", r.is_ok());
+    } else {
+        log::warn!("nativeStop: stop_tx already taken");
     }
     if let Some(t) = engine.thread.take() {
+        log::info!("nativeStop: joining engine thread (BLOCKS caller until it exits)...");
         let _ = t.join();
+        log::info!("nativeStop: engine thread JOINED");
+    } else {
+        log::warn!("nativeStop: no engine thread handle to join");
     }
-    log::info!("firewall_core stopped");
+    log::info!("firewall_core stopped (nativeStop RETURNING)");
 }
 
 /// Set engine mode: 1 = Filter (allow-by-default forwarding), 2 = DenyAll (kill switch).
@@ -282,12 +291,14 @@ fn engine_main(
         }
     };
 
+    log::info!("engine_main: runtime built; attaching to JVM");
     // Attach this (single) runtime thread to the JVM once, so per-flow protect/onFlow
     // callbacks reuse the attachment instead of attaching+detaching every time.
     if let Some(vm) = JVM.get() {
         let _ = vm.attach_current_thread_as_daemon();
     }
 
+    log::info!("engine_main: entering block_on");
     rt.block_on(async move {
         let tun = match Tun::new(tun_fd) {
             Ok(t) => Arc::new(t),
@@ -341,6 +352,7 @@ fn engine_main(
                         Err(e) => log::error!("netstack egress: {e}"),
                     }
                 }
+                log::info!("egress task (netstack->tun) exiting");
             });
         }
 
@@ -363,6 +375,7 @@ fn engine_main(
                         }
                     }
                 }
+                log::info!("ingress task (tun->netstack) exiting");
             });
         }
 
@@ -375,6 +388,7 @@ fn engine_main(
                     let id = FLOW_ID.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(handle_tcp(id, stream, src, dst, mode.clone(), registry.clone()));
                 }
+                log::info!("tcp accept task exiting");
             });
         }
 
@@ -386,9 +400,13 @@ fn engine_main(
             tokio::spawn(udp_dispatch(udp_read, reply_tx, mode.clone(), registry.clone()));
         }
 
+        log::info!("engine_main: datapath running; awaiting stop signal");
         let _ = stop_rx.await;
-        log::info!("engine loop exiting");
+        log::info!("engine loop exiting (stop signal received; block_on async block returning)");
     });
+    log::info!("engine_main: block_on returned; dropping tokio runtime (this drops tasks -> drops Tun -> closes tun fd)");
+    drop(rt);
+    log::info!("engine_main: runtime dropped; engine_main RETURNING (thread will now exit)");
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +703,15 @@ async fn udp_writer(mut writer: UdpWriteHalf, mut rx: mpsc::Receiver<UdpMsg>) {
 
 struct Tun {
     fd: AsyncFd<OwnedFd>,
+}
+
+impl Drop for Tun {
+    fn drop(&mut self) {
+        // KEY teardown signal: when this fires the OwnedFd closes the tun fd and the OS VPN
+        // interface comes down. If we STOP but never see this line, the fd leaked -> tunnel
+        // stays up -> "still filtering until process killed".
+        log::info!("Tun::drop — closing tun fd {}", self.fd.get_ref().as_raw_fd());
+    }
 }
 
 impl Tun {
@@ -1083,7 +1110,14 @@ fn init_log(debug: bool) {
         // log everything to logcat for development; RELEASE builds stay SILENT. The core logs
         // connection destinations/hostnames at Debug level, which must never leak to logcat on a
         // buddy's phone. Off = no native log records emitted at all.
-        let level = if debug { log::LevelFilter::Debug } else { log::LevelFilter::Off };
+        //
+        // ⚠️ TEMPORARY DIAGNOSTIC (stop-hang investigation 2026-06-24): forced ON regardless of
+        // build type so we capture the teardown trail even on a release/sideload build. INFO level
+        // only — the lifecycle/teardown logs are info!, while per-connection destinations/hosts are
+        // debug! and stay OUT (so a shipped build + the in-app log export leak no browsing metadata).
+        // REVERT to `if debug { Debug } else { Off }` once the stop bug is fixed.
+        let _ = debug;
+        let level = log::LevelFilter::Info;
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(level)

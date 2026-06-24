@@ -2,4 +2,6 @@
 <paths>
     <!-- Downloaded update APKs live in cacheDir/updates and are shared with the system installer. -->
     <cache-path name="updates" path="updates/" />
+    <!-- TEMPORARY DIAGNOSTIC: exported logs live in cacheDir/logs and are shared via ACTION_SEND. -->
+    <cache-path name="logs" path="logs/" />
 </paths>
