@@ -85,8 +85,10 @@ mantis-awx.com
 exbd.ex.co
 hebsdigital.com
 onesignal.com
-aureus.ringpublishing.com
-lrcontent.com
+# aureus.ringpublishing.com / lrcontent.com are Onet's (Ring Publishing) FIRST-PARTY infra —
+# blocking them broke onet.pl (fallback-onet.* content + config.lrcontent.com). Block only the
+# native-ad recommendation host instead; leave the content/config services alone.
+recommendations-onet.aureus.ringpublishing.com
 bi.im-g.pl
 fluid-player-analytics.sky.it
 nel.cloudflare.com
