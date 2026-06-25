@@ -75,3 +75,19 @@ syncingbridge.com
 rtb-oveeo.com
 salesmanago.com
 onnetwork.tv
+
+# --- Round 2 (diag 2026-06-25 17:52, after the app-allow fix); remaining web-ad/tracker leaks ---
+duhrawhide.com
+4strokemedia.com
+edkt.io
+anonm.io
+mantis-awx.com
+exbd.ex.co
+hebsdigital.com
+onesignal.com
+aureus.ringpublishing.com
+lrcontent.com
+bi.im-g.pl
+fluid-player-analytics.sky.it
+nel.cloudflare.com
+nel.goog
