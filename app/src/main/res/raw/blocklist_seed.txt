@@ -53,3 +53,25 @@ appsflyer.com
 adjust.com
 kochava.com
 branch.io
+
+# --- Observed leaking on-device (diag 2026-06-25); RTB / cookie-sync / SSP trackers not on lists ---
+avads.net
+spot.im
+rtactivate.com
+anyrtb.com
+amx1.net
+copper6.com
+openwebmp.com
+travelaudience.com
+streamtheworld.com
+bmtrcs.com
+y-medialink.com
+gamoshi.io
+hbrd.io
+ssp.wp.pl
+resetdigital.co
+visx.net
+syncingbridge.com
+rtb-oveeo.com
+salesmanago.com
+onnetwork.tv

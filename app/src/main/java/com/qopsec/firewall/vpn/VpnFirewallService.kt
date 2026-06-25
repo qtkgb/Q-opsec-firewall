@@ -316,12 +316,22 @@ class VpnFirewallService : VpnService() {
         // sinkhole stays system-wide (no uid at :53), so this exempts their connection-level traffic.
         val adBlockActive = settings.adBlock.value && !appPolicy.isAdBlockExempt(pkg)
 
+        // A destination-specific rule (host or ip set) is an explicit per-destination decision and
+        // always wins — this is the allowlist/denylist escape hatch (e.g. "allow this one blocked
+        // host", or "allow the app but deny app -> host"). A BROAD rule (app/global, no host/ip)
+        // does NOT win over the ad-block / encrypted-DNS backstops: a whole-app "Allow" is a
+        // firewall posture, not an ad-block exemption (use per-app "Exempt ad-block" for that).
+        val rule = decision.rule
+        val destSpecific = rule != null && (rule.host != null || rule.ip != null)
+
         val action = when {
-            decision.rule != null -> decision.action          // explicit rule: honor it (allowlist wins)
+            destSpecific -> decision.action                   // per-destination rule: honor it
             // Ad/tracker backstop: catches blocked hosts the DNS sinkhole missed (cached/IP-literal/SNI).
+            // Sits ABOVE a broad app/global allow so an app-wide "Allow" can't disable ad-block.
             adBlockActive && host != null && blockList.isBlocked(host) -> DENY
             // Encrypted-DNS backstop: stop apps escaping the :53 sinkhole via DoT/DoQ/DoH.
             settings.blockEncryptedDns.value && EncryptedDns.isEncryptedDns(host, dstIp, dstPort) -> DENY
+            rule != null -> decision.action                   // broad app/global rule
             !settings.askMode.value -> ALLOW                  // ask-mode off: default allow
             uid < 0 -> ALLOW                                  // can't attribute -> can't prompt
             else -> {                                          // unknown app: prompt + hold
