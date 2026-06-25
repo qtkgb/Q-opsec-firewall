@@ -148,9 +148,9 @@ pub extern "system" fn Java_com_qopsec_firewall_vpn_NativeBridge_nativeStart<'lo
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     tun_fd: jint,
-    debug: jni::sys::jboolean,
+    log_level: jint,
 ) -> jlong {
-    init_log(debug != 0);
+    init_log(log_level as i32);
 
     // Cache JVM + the NativeBridge class (must happen on this Java thread).
     if let Ok(vm) = env.get_java_vm() {
@@ -193,6 +193,16 @@ pub extern "system" fn Java_com_qopsec_firewall_vpn_NativeBridge_nativeStart<'lo
     });
     log::info!("firewall_core started on tun fd {fd}");
     Box::into_raw(engine) as jlong
+}
+
+/// Change the core's log verbosity live (Settings → Diagnostics): 0 off / 1 info / 2 debug.
+#[no_mangle]
+pub extern "system" fn Java_com_qopsec_firewall_vpn_NativeBridge_nativeSetLogLevel<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    level: jint,
+) {
+    set_log_level(level as i32);
 }
 
 /// Stop the datapath and release resources for the given handle.
@@ -1102,26 +1112,35 @@ fn skip_dns_name(buf: &[u8], start: usize) -> Option<usize> {
     read_dns_name(buf, start).map(|(_, p)| p)
 }
 
-fn init_log(debug: bool) {
+/// Map the Kotlin DiagLevel (0 off / 1 info / 2 debug) to a log filter.
+fn level_filter(level: i32) -> log::LevelFilter {
+    match level {
+        0 => log::LevelFilter::Off,
+        1 => log::LevelFilter::Info,  // lifecycle only — per-connection lines are debug!, stay hidden
+        _ => log::LevelFilter::Debug, // full: includes dns-sinkhole / SNI / per-connection hosts
+    }
+}
+
+/// Set the EFFECTIVE log verbosity. The `log` macros short-circuit on `log::max_level()`, so
+/// Off truly emits nothing (no connection metadata reaches logcat). Safe to call any time —
+/// this is what makes the Settings → Diagnostics toggle take effect live.
+fn set_log_level(level: i32) {
+    log::set_max_level(level_filter(level));
+}
+
+/// Driven by the user's Settings → Diagnostics level (passed from Kotlin at nativeStart and
+/// updated live via nativeSetLogLevel). android_logger is installed ONCE at its most verbose; the
+/// real gate is `log::set_max_level`, so the level can change without restarting the process.
+/// Default is OFF — a shipped build logs nothing and never leaks browsing destinations to logcat
+/// unless a tech-savvy user opts in. FULL logs connection hostnames (that's its purpose).
+fn init_log(level: i32) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        // Gated on the APP's build type (BuildConfig.DEBUG, passed from Kotlin) — NOT the .so's
-        // compile profile, since cargo-ndk always builds the .so with --release. Debug app builds
-        // log everything to logcat for development; RELEASE builds stay SILENT. The core logs
-        // connection destinations/hostnames at Debug level, which must never leak to logcat on a
-        // buddy's phone. Off = no native log records emitted at all.
-        //
-        // ⚠️ TEMPORARY DIAGNOSTIC (ad-block leak investigation 2026-06-25): forced to DEBUG regardless
-        // of build type so the in-app log export captures the per-connection sinkhole / SNI / deny
-        // decisions WITH HOSTNAMES — needed to name exactly which ad domains slip through. NOTE: this
-        // means a shipped build logs browsing destinations to logcat; that's the whole point of this
-        // throwaway build. REVERT to `if debug { Debug } else { Off }` once the leak is understood.
-        let _ = debug;
-        let level = log::LevelFilter::Debug;
         android_logger::init_once(
             android_logger::Config::default()
-                .with_max_level(level)
+                .with_max_level(log::LevelFilter::Debug)
                 .with_tag("firewall_core"),
         );
     });
+    set_log_level(level);
 }

@@ -12,18 +12,18 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import java.net.Inet6Address
 import java.net.InetAddress
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
-import com.qopsec.firewall.BuildConfig
 import com.qopsec.firewall.MainActivity
 import com.qopsec.firewall.R
 import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.BlocklistManager
 import com.qopsec.firewall.data.AppPolicy
 import com.qopsec.firewall.data.ConnLog
+import com.qopsec.firewall.data.Diag
+import com.qopsec.firewall.data.toNative
 import com.qopsec.firewall.data.EncryptedDns
 import com.qopsec.firewall.data.Rule
 import com.qopsec.firewall.data.RuleRepository
@@ -70,10 +70,6 @@ class VpnFirewallService : VpnService() {
         private const val MODE_FILTER = 1
         private const val MODE_DENY = 2
 
-        // ⚠️ TEMPORARY DIAGNOSTIC (stop-hang investigation 2026-06-24): verbose teardown logging.
-        // Remove these Log.* calls + this TAG once the stop bug is fixed.
-        private const val TAG = "qopsec_fw"
-
         private const val CHANNEL_ID = "capture"
         private const val PROMPT_CHANNEL_ID = "prompts"
         private const val NOTIF_ID = 1
@@ -108,12 +104,12 @@ class VpnFirewallService : VpnService() {
     private val fallbackSeen = java.util.Collections.synchronizedSet(HashSet<String>())
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "onStartCommand action=${intent?.action} thread=${Thread.currentThread().name} running=$running")
+        Diag.life("onStartCommand action=${intent?.action} thread=${Thread.currentThread().name} running=$running")
         when (intent?.action) {
             ACTION_STOP -> {
-                Log.i(TAG, "onStartCommand: ACTION_STOP -> stopCapture()")
+                Diag.life("onStartCommand: ACTION_STOP -> stopCapture()")
                 stopCapture()
-                Log.i(TAG, "onStartCommand: stopCapture() returned -> START_NOT_STICKY")
+                Diag.life("onStartCommand: stopCapture() returned -> START_NOT_STICKY")
                 return START_NOT_STICKY
             }
             ACTION_ALLOW_APP -> resolvePrompt(intent, Rule.ACTION_ALLOW)
@@ -168,7 +164,7 @@ class VpnFirewallService : VpnService() {
 
         running = true
         CaptureLog.setRunning(true)
-        Log.i(TAG, "startCapture: tunnel established (native=${NativeBridge.available}, bootLock=$bootLock)")
+        Diag.life("startCapture: tunnel established (native=${NativeBridge.available}, bootLock=$bootLock)")
 
         if (NativeBridge.available) {
             startNativeForwarding(pfd)
@@ -205,9 +201,12 @@ class VpnFirewallService : VpnService() {
         UserDomains.get(this)        // ensure custom-block + allowlist exceptions are merged too
         // detachFd transfers ownership: the PFD won't close the fd; the core will.
         val fd = pfd.detachFd()
-        Log.i(TAG, "startNativeForwarding: detached tun fd=$fd -> nativeStart")
-        nativeHandle = NativeBridge.nativeStart(fd, BuildConfig.DEBUG)
-        Log.i(TAG, "startNativeForwarding: nativeStart returned handle=$nativeHandle")
+        // Sync the user's Diagnostics level into both gates (Kotlin Diag + native core) at start.
+        val diag = settings.diagLevel.value
+        Diag.level = diag
+        Diag.life("startNativeForwarding: detached tun fd=$fd -> nativeStart (diag=$diag)")
+        nativeHandle = NativeBridge.nativeStart(fd, diag.toNative())
+        Diag.life("startNativeForwarding: nativeStart returned handle=$nativeHandle")
         if (nativeHandle == 0L) {
             // Native start failed: we already gave up the fd, so just stop cleanly.
             stopCapture()
@@ -340,11 +339,11 @@ class VpnFirewallService : VpnService() {
             }
         }
 
-        // ⚠️ TEMPORARY DIAGNOSTIC (ad-block leak investigation 2026-06-25): name every flow's host +
-        // verdict so we can see which ad domains leak and why (onList=false → not on a blocklist;
-        // host=- → no DNS/SNI to match on, e.g. QUIC). Remove with the rest of the instrumentation.
-        Log.d(
-            TAG,
+        // FULL diagnostics only (Settings → Diagnostics): names every flow's host + verdict so a
+        // user debugging ad leaks can see what's allowed and why (onList=false → not on a blocklist;
+        // host=- → no DNS/SNI to match on, e.g. QUIC). This line includes destination hostnames, so
+        // it's gated to FULL and never emitted at SIMPLE/OFF.
+        Diag.flow(
             "decide $l4 $dstIp:$dstPort host=${host ?: "-"} pkg=${pkg ?: "-"} " +
                 "adBlock=$adBlockActive onList=${host != null && blockList.isBlocked(host)} verdict=$action",
         )
@@ -471,19 +470,19 @@ class VpnFirewallService : VpnService() {
 
     private fun stopCapture() {
         val t0 = System.currentTimeMillis()
-        Log.i(TAG, "stopCapture: ENTER running=$running handle=$nativeHandle thread=${Thread.currentThread().name}")
+        Diag.life("stopCapture: ENTER running=$running handle=$nativeHandle thread=${Thread.currentThread().name}")
         running = false
         CaptureLog.setRunning(false)
         CaptureLog.setKilled(false)
-        Log.i(TAG, "stopCapture: CaptureLog set to stopped (UI now shows stopped)")
+        Diag.life("stopCapture: CaptureLog set to stopped (UI now shows stopped)")
 
         if (nativeHandle != 0L) {
-            Log.i(TAG, "stopCapture: calling NativeBridge.nativeStop($nativeHandle) -- watch for it to return")
+            Diag.life("stopCapture: calling NativeBridge.nativeStop($nativeHandle) -- watch for it to return")
             NativeBridge.nativeStop(nativeHandle)   // also closes the tun fd it owns
-            Log.i(TAG, "stopCapture: nativeStop() RETURNED after ${System.currentTimeMillis() - t0}ms")
+            Diag.life("stopCapture: nativeStop() RETURNED after ${System.currentTimeMillis() - t0}ms")
             nativeHandle = 0L
         } else {
-            Log.i(TAG, "stopCapture: nativeHandle already 0 (no native engine to stop)")
+            Diag.life("stopCapture: nativeHandle already 0 (no native engine to stop)")
         }
         NativeBridge.protector = null
         NativeBridge.decider = null
@@ -493,22 +492,22 @@ class VpnFirewallService : VpnService() {
         ipv6Fwd = null
         clearPrompts()
         fallbackSeen.clear()
-        Log.i(TAG, "stopCapture: callbacks cleared, netcallback unregistered")
+        Diag.life("stopCapture: callbacks cleared, netcallback unregistered")
 
         try { tun?.close() } catch (_: Exception) {}
         tun = null
         reader?.interrupt()
         reader = null
 
-        Log.i(TAG, "stopCapture: calling stopForeground + stopSelf")
+        Diag.life("stopCapture: calling stopForeground + stopSelf")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        Log.i(TAG, "stopCapture: DONE in ${System.currentTimeMillis() - t0}ms (service stopping)")
+        Diag.life("stopCapture: DONE in ${System.currentTimeMillis() - t0}ms (service stopping)")
     }
 
     /** The OS calls this when another VPN takes over — stop cleanly so we never silently linger. */
     override fun onRevoke() {
-        Log.i(TAG, "onRevoke: another VPN took over -> stopCapture")
+        Diag.life("onRevoke: another VPN took over -> stopCapture")
         notifyRevoked()
         stopCapture()
         super.onRevoke()
@@ -535,7 +534,7 @@ class VpnFirewallService : VpnService() {
     }
 
     override fun onDestroy() {
-        Log.i(TAG, "onDestroy: service being destroyed -> stopCapture")
+        Diag.life("onDestroy: service being destroyed -> stopCapture")
         stopCapture()
         scope.cancel()
         super.onDestroy()

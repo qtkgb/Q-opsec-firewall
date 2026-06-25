@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -46,6 +47,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qopsec.firewall.data.BiometricAuth
 import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.BlocklistManager
+import com.qopsec.firewall.data.Diag
+import com.qopsec.firewall.data.DiagLevel
+import com.qopsec.firewall.data.toNative
 import com.qopsec.firewall.data.LockStore
 import com.qopsec.firewall.data.LogExporter
 import com.qopsec.firewall.data.Settings
@@ -342,20 +346,35 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
                 ThemeChip("Dark", themeMode == ThemeMode.DARK) { settings.setThemeMode(ThemeMode.DARK) }
             }
 
-            // TEMPORARY DIAGNOSTIC (stop-hang investigation): capture + share this app's start/stop
-            // log straight from the phone (no adb). Remove with the rest of the instrumentation.
-            Spacer(Modifier.height(22.dp))
+            // ── Diagnostics ──────────────────────────────────────────────────────────────
+            // For the tech-savvy: capture an in-app log (no adb) to diagnose issues / send
+            // feedback. Two opt-in levels + share. Set off by default so a shipped build stays
+            // silent. Bounded by thin red dividers top and bottom (per design).
+            val diagLevel by settings.diagLevel.collectAsStateWithLifecycle()
+            val diagLine = LocalStatusPalette.current.blocked
+            Spacer(Modifier.height(24.dp))
+            HorizontalDivider(thickness = 1.dp, color = diagLine)
+            Spacer(Modifier.height(16.dp))
             Text("Diagnostics", style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = "Capture the firewall log and share it. To debug ad leaks: Start the firewall, " +
-                    "open the site where ads show, let it load, then come here and save the log.",
+                text = "Capture an in-app log to diagnose problems or send feedback. " +
+                    "Off = nothing is recorded (recommended). Simplified = only start/stop and " +
+                    "engine events (no browsing data). Full = also each connection’s destination " +
+                    "host — use this to debug ad leaks, but it reveals the sites you visit, so " +
+                    "switch it back off when you’re done.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ThemeChip("Off", diagLevel == DiagLevel.OFF) { applyDiag(settings, DiagLevel.OFF) }
+                ThemeChip("Simplified", diagLevel == DiagLevel.SIMPLE) { applyDiag(settings, DiagLevel.SIMPLE) }
+                ThemeChip("Full", diagLevel == DiagLevel.FULL) { applyDiag(settings, DiagLevel.FULL) }
+            }
+            Spacer(Modifier.height(12.dp))
             var savingLog by remember { mutableStateOf(false) }
             OutlinedButton(
-                enabled = !savingLog,
+                enabled = !savingLog && diagLevel != DiagLevel.OFF,
                 onClick = {
                     savingLog = true
                     scope.launch {
@@ -364,7 +383,17 @@ fun SettingsScreen(onBack: () -> Unit, onPerApp: () -> Unit) {
                         LogExporter.share(context, f)
                     }
                 },
-            ) { Text(if (savingLog) "Saving…" else "Save & share log") }
+            ) { Text(if (savingLog) "Saving…" else "Download / share log") }
+            if (diagLevel == DiagLevel.OFF) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Turn on Simplified or Full to capture a log.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(thickness = 1.dp, color = diagLine)
 
             Spacer(Modifier.height(28.dp))
             Text(
@@ -593,6 +622,13 @@ private fun ThemeChip(label: String, selected: Boolean, onClick: () -> Unit) {
     } else {
         OutlinedButton(onClick = onClick) { Text(label) }
     }
+}
+
+/** Persist the Diagnostics level and apply it LIVE to both log gates (Kotlin + native core). */
+private fun applyDiag(settings: Settings, level: DiagLevel) {
+    settings.setDiagLevel(level)
+    Diag.level = level
+    if (NativeBridge.available) NativeBridge.nativeSetLogLevel(level.toNative())
 }
 
 @Composable

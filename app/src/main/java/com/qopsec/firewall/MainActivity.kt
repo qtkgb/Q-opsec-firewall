@@ -29,6 +29,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.qopsec.firewall.data.BiometricAuth
 import com.qopsec.firewall.data.BlocklistManager
+import com.qopsec.firewall.data.Diag
 import com.qopsec.firewall.data.BlocklistUpdateWorker
 import com.qopsec.firewall.data.LockStore
 import com.qopsec.firewall.data.Settings
@@ -62,6 +63,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Diag.level = appSettings.diagLevel.value   // sync the Kotlin log gate with the saved setting
         locked.value = lock.isEnabled
         maybeRequestNotifPermission()
         scheduleTrashPurge()
@@ -185,7 +187,7 @@ class MainActivity : FragmentActivity() {
 
     private fun stopCaptureService() {
         // ⚠️ TEMPORARY DIAGNOSTIC (stop-hang investigation 2026-06-24): remove once fixed.
-        android.util.Log.i("qopsec_fw", "MainActivity.stopCaptureService: user tapped Stop -> sending ACTION_STOP")
+        Diag.life("MainActivity.stopCaptureService: user tapped Stop -> sending ACTION_STOP")
         startService(
             Intent(this, VpnFirewallService::class.java).setAction(VpnFirewallService.ACTION_STOP)
         )

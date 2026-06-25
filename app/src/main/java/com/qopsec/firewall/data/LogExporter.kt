@@ -10,11 +10,11 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * TEMPORARY DIAGNOSTIC (stop-hang investigation 2026-06-24): dumps THIS app's own logcat
- * (our two tags only, Info+ — deliberately NOT the per-connection Debug logs, so no destination
- * hostnames/IPs end up in the export) to a cache file and shares it. Lets the user capture the
- * firewall start/stop teardown trail from the phone with no adb. Remove this file + the Settings
- * "Diagnostics" section + the forced-on native logging once the stop bug is fixed.
+ * Backs Settings → Diagnostics: dumps THIS app's own logcat (our two tags only) to a cache file
+ * and shares it, so a user can capture a log from the phone with no adb. What's actually in the
+ * buffer depends on the user's chosen [DiagLevel] — at SIMPLE only lifecycle lines were emitted
+ * (no hostnames); at FULL the per-connection lines (with destination hosts) are included. An app
+ * may only read its OWN logs, so this never sees other apps.
  */
 object LogExporter {
 
@@ -33,6 +33,7 @@ object LogExporter {
                     "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n",
             )
             w.write("captured ${Date()}\n")
+            w.write("diagnostics level: ${Diag.level}\n")
             w.write("----------------------------------------\n")
             // `-d` dumps the buffer and exits. An app may only read its OWN logs, so this is just
             // our process. Filter to our two tags. DEBUG level (ad-block leak investigation) so the

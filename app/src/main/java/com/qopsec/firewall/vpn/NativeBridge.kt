@@ -46,9 +46,14 @@ object NativeBridge {
     var blockHostChecker: ((host: String) -> Boolean)? = null
 
     private external fun nativeVersion(): String
-    external fun nativeStart(tunFd: Int, debug: Boolean): Long
+
+    /** [logLevel]: 0 off / 1 info (lifecycle) / 2 debug (per-connection). See DiagLevel.toNative(). */
+    external fun nativeStart(tunFd: Int, logLevel: Int): Long
     external fun nativeStop(handle: Long)
     external fun nativeSetMode(handle: Long, mode: Int)
+
+    /** Change the core's log verbosity live (0 off / 1 info / 2 debug) without a restart. */
+    external fun nativeSetLogLevel(level: Int)
 
     /** Ask the core to re-check active flows against current rules and drop newly-denied ones. */
     external fun nativeReevaluate(handle: Long)

@@ -8,6 +8,21 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class ThemeMode { LIGHT, DARK, SYSTEM }
 
 /**
+ * Diagnostic logging verbosity (Settings → Diagnostics). Maps 1:1 to the native log level.
+ * - [OFF]: nothing is logged (default; no connection metadata ever reaches logcat).
+ * - [SIMPLE]: lifecycle/summary only — start/stop/teardown, engine status, errors. No hostnames.
+ * - [FULL]: per-connection detail incl. destination hosts (for ad-leak / blocking diagnosis).
+ */
+enum class DiagLevel { OFF, SIMPLE, FULL }
+
+/** Native log level the core understands (0 off / 1 info / 2 debug). */
+fun DiagLevel.toNative(): Int = when (this) {
+    DiagLevel.OFF -> 0
+    DiagLevel.SIMPLE -> 1
+    DiagLevel.FULL -> 2
+}
+
+/**
  * Lightweight persisted settings (SharedPreferences) exposed as StateFlow for Compose.
  *
  * [askMode]: when true, an app with no rule has its first connection HELD and the user is
@@ -58,6 +73,12 @@ class Settings private constructor(context: Context) {
     private val _autoUpdateCheck = MutableStateFlow(prefs.getBoolean(KEY_AUTOUPDATE, true))
     val autoUpdateCheck: StateFlow<Boolean> = _autoUpdateCheck.asStateFlow()
 
+    private val _diagLevel = MutableStateFlow(
+        runCatching { DiagLevel.valueOf(prefs.getString(KEY_DIAG, DiagLevel.OFF.name)!!) }
+            .getOrDefault(DiagLevel.OFF)
+    )
+    val diagLevel: StateFlow<DiagLevel> = _diagLevel.asStateFlow()
+
     private val _themeMode = MutableStateFlow(
         runCatching { ThemeMode.valueOf(prefs.getString(KEY_THEME, ThemeMode.SYSTEM.name)!!) }
             .getOrDefault(ThemeMode.SYSTEM),
@@ -72,6 +93,11 @@ class Settings private constructor(context: Context) {
     fun setBootLock(value: Boolean) {
         prefs.edit().putBoolean(KEY_BOOT, value).apply()
         _bootLock.value = value
+    }
+
+    fun setDiagLevel(level: DiagLevel) {
+        prefs.edit().putString(KEY_DIAG, level.name).apply()
+        _diagLevel.value = level
     }
 
     fun setAutoUpdateCheck(value: Boolean) {
@@ -123,6 +149,7 @@ class Settings private constructor(context: Context) {
         private const val KEY_DNS = "dns_resolver"
         private const val KEY_FWD_V6 = "forward_ipv6"
         private const val KEY_AUTOUPDATE = "auto_update_check"
+        private const val KEY_DIAG = "diag_level"
         private const val KEY_CFILTER = "conn_filter"
         private const val KEY_CKIND = "conn_kind"
         private const val KEY_CSORT = "conn_sort"
