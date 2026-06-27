@@ -62,6 +62,8 @@ class VpnFirewallService : VpnService() {
         const val ACTION_KILL_ON = "com.qopsec.firewall.action.KILL_ON"
         const val ACTION_KILL_OFF = "com.qopsec.firewall.action.KILL_OFF"
         const val EXTRA_BOOT_LOCK = "boot_lock"
+        // Min interval between conn_log row refreshes for the same flow (see lastConnWrite).
+        private const val CONN_WRITE_THROTTLE_MS = 2000L
         private const val EXTRA_UID = "uid"
         private const val EXTRA_PKG = "pkg"
         private const val EXTRA_LABEL = "label"
@@ -102,6 +104,12 @@ class VpnFirewallService : VpnService() {
 
     // Phase 1a fallback only: dedup conn_log writes to one per distinct flow.
     private val fallbackSeen = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    // Rate-limit conn_log writes per flow. Under heavy traffic decide() fires hundreds of times/sec
+    // for the same long-lived flows; rewriting the row each time floods Room's invalidation tracker,
+    // which re-emits the connLog Flow and storms the Connections UI -> main-thread ANR. New flows are
+    // still recorded immediately; an existing flow's row is refreshed at most once per window.
+    private val lastConnWrite = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Diag.life("onStartCommand action=${intent?.action} thread=${Thread.currentThread().name} running=$running")
@@ -348,21 +356,27 @@ class VpnFirewallService : VpnService() {
                 "adBlock=$adBlockActive onList=${host != null && blockList.isBlocked(host)} verdict=$action",
         )
 
-        scope.launch {
-            rules.recordConn(
-                ConnLog(
-                    flowKey = "$uid|$proto|$dstIp|$dstPort",
-                    ts = System.currentTimeMillis(),
-                    appUid = uid,
-                    appLabel = resolver.label(uid),
-                    packageName = pkg,
-                    proto = proto,
-                    ipVersion = if (dstIp.contains(':')) 6 else 4,
-                    dstIp = dstIp,
-                    dstHost = host,
-                    dstPort = dstPort,
+        val flowKey = "$uid|$proto|$dstIp|$dstPort"
+        val now = System.currentTimeMillis()
+        val prev = lastConnWrite[flowKey]
+        if (prev == null || now - prev >= CONN_WRITE_THROTTLE_MS) {
+            lastConnWrite[flowKey] = now
+            scope.launch {
+                rules.recordConn(
+                    ConnLog(
+                        flowKey = flowKey,
+                        ts = now,
+                        appUid = uid,
+                        appLabel = resolver.label(uid),
+                        packageName = pkg,
+                        proto = proto,
+                        ipVersion = if (dstIp.contains(':')) 6 else 4,
+                        dstIp = dstIp,
+                        dstHost = host,
+                        dstPort = dstPort,
+                    )
                 )
-            )
+            }
         }
         return action
     }

@@ -96,3 +96,12 @@ recommendations-onet.aureus.ringpublishing.com
 fluid-player-analytics.sky.it
 nel.cloudflare.com
 nel.goog
+
+# --- Round 3 (tablet diag 2026-06-27, SM-T733 / v1.1.9); remaining onList=false ad/tracker leaks ---
+# All were verdict=0 (allowed) only because they were on no list; not breakage-risky (3rd-party, not
+# publisher content/config). Left Viafoura (comments), JWPlayer (video), CMP consent managers, and the
+# Reach/Onet/Agora content domains ALONE.
+go.mediagotechnology.com          # MediaGo (Baidu) native-ad / recommendation network
+ssp.disqus.com                    # Disqus supply-side platform (ads), not the comments widget
+cs.loudecho.ai                    # LoudEcho ad/monetization vendor
+static.reachdata.live             # Reach plc audience-data / tracking (not content)

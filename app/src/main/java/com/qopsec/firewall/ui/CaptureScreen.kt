@@ -58,9 +58,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import com.qopsec.firewall.R
-import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.ConnLog
+import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.Rule
 import com.qopsec.firewall.data.RuleRepository
 import com.qopsec.firewall.data.Settings
@@ -211,6 +215,9 @@ private class HostTarget(val app: AppInfo, val ev: ConnectionEvent)
 /** Per-flow annotation precomputed once so filtering + rows don't re-run the matcher. */
 private data class ConnAnno(val verdict: Int, val isAd: Boolean)
 
+// Max cadence for refreshing the Connections list from the conn_log Flow (ANR guard — see usage).
+private const val CONN_REFRESH_MS = 350L
+
 private enum class ConnFilter(val label: String) {
     All("All"), Allowed("Allowed"), Blocked("Blocked"), Ads("Ads & trackers")
 }
@@ -222,19 +229,45 @@ private enum class ConnKind(val label: String) {
 
 private enum class ConnSort(val label: String) { Recent("Recent"), Name("Name"), Busiest("Busiest") }
 
+@OptIn(kotlinx.coroutines.FlowPreview::class) // Flow.sample (conn_log refresh throttle)
 @Composable
 private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
     val context = LocalContext.current
     val settings = remember { Settings.get(context) }
     val blockList = remember { BlockList.get(context) }
 
-    // Durable history (survives restarts); updates live as new flows are recorded.
-    val log by repo.connLog.collectAsStateWithLifecycle(initialValue = emptyList<ConnLog>())
-    val events = remember(log) { log.map { it.toEvent() } }
     // Collected so badges recompute when rules change: each row shows the verdict the CURRENT
     // rules would give it, not the verdict from when it was first seen.
     val rules by repo.allRules.collectAsStateWithLifecycle(initialValue = emptyList<Rule>())
     val adBlock by settings.adBlock.collectAsStateWithLifecycle()
+
+    // Durable history (survives restarts); updates live as new flows are recorded.
+    //
+    // ANR GUARD: under heavy traffic conn_log is written very frequently, so the Room Flow can emit
+    // many times per second. Mapping rows to events + computing the per-flow verdict/ad annotation
+    // over up to 1000 rows is expensive, so we (1) sample the flow to cap UI refreshes to a few/sec
+    // and (2) run the whole map+decide off the main thread via flowOn(Default). Without this the
+    // recomposition storm blocks the UI thread and ANRs (esp. on tablets with this tab visible).
+    val annotated by remember(rules, adBlock) {
+        repo.connLog
+            .sample(CONN_REFRESH_MS)
+            .map { rows ->
+                val events = rows.map { it.toEvent() }
+                val annos = events.associateWith { ev ->
+                    val verdict = repo.decideIn(
+                        rules, ev.uid, ev.packageName, protoNum(ev.protocol), ev.dstIp, ev.host, ev.dstPort,
+                    ).action
+                    val isAd = adBlock && ev.host?.let { blockList.isBlocked(it) } == true
+                    ConnAnno(verdict, isAd)
+                }
+                events to annos
+            }
+            .flowOn(Dispatchers.Default)
+    }.collectAsStateWithLifecycle(
+        initialValue = emptyList<ConnectionEvent>() to emptyMap<ConnectionEvent, ConnAnno>(),
+    )
+    val events = annotated.first
+    val annos = annotated.second
 
     val expanded = remember { mutableStateMapOf<Int, Boolean>() }
     var hostDialog by remember { mutableStateOf<HostTarget?>(null) }
@@ -249,18 +282,6 @@ private fun ConnectionsTab(repo: RuleRepository, searchOpen: Boolean) {
         mutableStateOf(runCatching { ConnSort.valueOf(settings.connSort()) }.getOrDefault(ConnSort.Recent))
     }
     var confirmBlockAll by remember { mutableStateOf(false) }
-
-    // Precompute the rules-only verdict + the ad/tracker status (DNS blocklist) per flow, once,
-    // so neither the filter nor the rows re-run the matcher on every keystroke/recompose.
-    val annos = remember(events, rules, adBlock) {
-        events.associateWith { ev ->
-            val verdict = repo.decideIn(
-                rules, ev.uid, ev.packageName, protoNum(ev.protocol), ev.dstIp, ev.host, ev.dstPort,
-            ).action
-            val isAd = adBlock && ev.host?.let { blockList.isBlocked(it) } == true
-            ConnAnno(verdict, isAd)
-        }
-    }
 
     val filtering = query.isNotBlank() || filter != ConnFilter.All || kind != ConnKind.Any
 
