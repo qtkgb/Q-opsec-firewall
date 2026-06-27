@@ -15,11 +15,14 @@ jni = "0.21"
 # TcpStream / UdpSocket for arbitrary destinations; we relay each to a protect()ed
 # OS socket. tokio drives the async relays; futures gives Stream/Sink.
 netstack-smoltcp = "0.2"
-tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 futures = "0.3"
 libc = "0.2"
 log = "0.4"
 android_logger = "0.14"
+# Per-module log filter (cap smoltcp's per-packet "device exhausted" debug so FULL diagnostics
+# can't flood logcat). Pinned to the version android_logger pulls in so the Filter type matches.
+env_filter = "0.1"
 # "log" feature bridges netstack-smoltcp's `tracing` events into `log` -> android_logger,
 # so they show up in `adb logcat -s firewall_core`.
 tracing = { version = "0.1", features = ["log"] }

@@ -289,7 +289,17 @@ fn engine_main(
     registry: FlowRegistry,
     stop_rx: oneshot::Receiver<()>,
 ) {
-    let rt = match tokio::runtime::Builder::new_current_thread()
+    // MULTI-THREADED runtime (was new_current_thread). Under a sustained high-throughput upload the
+    // netstack (smoltcp) can momentarily run out of TX tokens ("device exhausted") and its interface
+    // runner busy-polls until the egress (netstack->tun) task drains it. On a SINGLE-threaded executor
+    // the spinning runner starves that very drain task -> livelock: the upload stalls and a CPU is
+    // pegged (and at FULL diagnostics this also floods logcat ~170k lines/s -> ANR). With >1 worker the
+    // drain task runs concurrently with the runner, so the exhausted condition clears and throughput
+    // holds. Kept small (2 workers) to break the livelock without spawning a thread per core (battery).
+    // JNI is fine on any worker: the protect/decide/dns callbacks attach_current_thread() per call, and
+    // shared state is Arc<Mutex>/atomics.
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
     {
@@ -301,9 +311,9 @@ fn engine_main(
         }
     };
 
-    log::info!("engine_main: runtime built; attaching to JVM");
-    // Attach this (single) runtime thread to the JVM once, so per-flow protect/onFlow
-    // callbacks reuse the attachment instead of attaching+detaching every time.
+    log::info!("engine_main: runtime built (multi-thread); attaching to JVM");
+    // Attach the block_on thread to the JVM. Worker threads attach themselves per callback
+    // (attach_current_thread in protect_fd/decide_flow/report_dns/is_blocked_host).
     if let Some(vm) = JVM.get() {
         let _ = vm.attach_current_thread_as_daemon();
     }
@@ -1136,10 +1146,20 @@ fn set_log_level(level: i32) {
 fn init_log(level: i32) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // Cap smoltcp/netstack at Warn regardless of our level: under sustained high throughput
+        // smoltcp emits a per-packet `debug!("failed to transmit IP: device exhausted")` that can
+        // hit ~170k lines/sec, which floods logcat and can stall the app at FULL diagnostics. Our
+        // own firewall_core/qopsec logs (default Trace here) are unaffected; the live OFF/SIMPLE/FULL
+        // gate is still log::set_max_level() below.
+        let mut fb = env_filter::Builder::new();
+        fb.filter_level(log::LevelFilter::Trace)
+            .filter_module("smoltcp", log::LevelFilter::Warn)
+            .filter_module("netstack_smoltcp", log::LevelFilter::Warn);
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Debug)
-                .with_tag("firewall_core"),
+                .with_tag("firewall_core")
+                .with_filter(fb.build()),
         );
     });
     set_log_level(level);
