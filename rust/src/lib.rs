@@ -13,8 +13,8 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::os::fd::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::Duration;
 
@@ -38,6 +38,12 @@ const PROTO_UDP: jint = 17;
 const PORT_HTTPS: u16 = 443;
 /// How long to wait for the TLS ClientHello before relaying a :443 flow without SNI.
 const SNI_PEEK_SECS: u64 = 2;
+/// Fail-open watchdog (engine_main): check interval, the per-window ingress packets that count as
+/// "traffic is flowing", and how many consecutive windows of (ingress flowing, egress frozen) before
+/// we declare the datapath wedged and tear the tunnel down.
+const WATCHDOG_SECS: u64 = 3;
+const WATCHDOG_MIN_INGRESS: u64 = 200;
+const WATCHDOG_STRIKES: u32 = 3;
 
 // Verdicts returned by the Kotlin matcher (NativeBridge.decideFlow).
 const VERDICT_ALLOW: i32 = 0;
@@ -59,6 +65,30 @@ static FLOW_ID: AtomicU64 = AtomicU64::new(1);
 /// Whether to forward IPv6 (set from Kotlin via nativeSetIpv6 based on real v6 egress). When false
 /// the netstack drops v6 at ingress so dual-stack apps fall back to IPv4 (see the filter comment).
 static IPV6_FWD: AtomicBool = AtomicBool::new(false);
+
+/// Datapath liveness counters for the fail-open watchdog (see engine_main). If the netstack wedges
+/// under sustained load (smoltcp stuck "device exhausted", or the egress task dies) the tunnel would
+/// stay up but pass no traffic -> internet blackhole that survives closing the app (foreground
+/// service). The watchdog notices ingress flowing with egress flat and tears the tunnel down instead.
+static INGRESS_PKTS: AtomicU64 = AtomicU64::new(0);
+static EGRESS_PKTS: AtomicU64 = AtomicU64::new(0);
+
+/// Raw tun fd, shared so nativeStop (and the fail-open watchdog teardown) can close it DIRECTLY and
+/// immediately — bringing the OS VPN interface down and restoring internet the instant Stop is
+/// tapped, without waiting for the engine threads to unwind. `Tun` does NOT own the fd (it wraps a
+/// non-closing `RawTun`); this guarded swap is the single closer, so it's safe to call from both the
+/// stop path and `Tun::drop` (whoever runs first closes; the other no-ops).
+static TUN_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Close the tun fd exactly once (idempotent). Brings the VPN interface down -> traffic flows
+/// normally again, and makes the engine's read/write tasks error out so the runtime can unwind.
+fn close_tun_fd() {
+    let fd = TUN_FD.swap(-1, Ordering::SeqCst);
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+        log::info!("Tun fd {fd} closed (interface down)");
+    }
+}
 
 /// Active = relaying (re-eval tears it down if now denied). Pending = held awaiting a
 /// verdict (re-eval wakes it to re-decide).
@@ -217,19 +247,21 @@ pub extern "system" fn Java_com_qopsec_firewall_vpn_NativeBridge_nativeStop<'loc
     }
     log::info!("nativeStop: ENTER handle={handle}");
     let mut engine = unsafe { Box::from_raw(handle as *mut Engine) };
+    // STEP 1 — bring the interface DOWN immediately. This restores normal internet the instant Stop
+    // is tapped, regardless of whether the engine threads are wedged under load, and unblocks the
+    // tun read/write tasks so the runtime can unwind. This is the fix for "Stop but traffic still
+    // blocked / app ANRs": teardown no longer depends on a possibly-stuck engine.
+    close_tun_fd();
+    // STEP 2 — ask the engine to stop; engine_main does a BOUNDED shutdown_timeout, so the join below
+    // returns promptly even if a worker is spinning. (Kotlin also runs nativeStop off the main thread
+    // as belt-and-suspenders.)
     if let Some(tx) = engine.stop_tx.take() {
-        log::info!("nativeStop: sending stop signal");
-        let r = tx.send(());
-        log::info!("nativeStop: stop signal sent (ok={})", r.is_ok());
-    } else {
-        log::warn!("nativeStop: stop_tx already taken");
+        let _ = tx.send(());
     }
     if let Some(t) = engine.thread.take() {
-        log::info!("nativeStop: joining engine thread (BLOCKS caller until it exits)...");
+        log::info!("nativeStop: joining engine thread...");
         let _ = t.join();
         log::info!("nativeStop: engine thread JOINED");
-    } else {
-        log::warn!("nativeStop: no engine thread handle to join");
     }
     log::info!("firewall_core stopped (nativeStop RETURNING)");
 }
@@ -368,6 +400,7 @@ fn engine_main(
                                 log::error!("tun write: {e}");
                                 break;
                             }
+                            EGRESS_PKTS.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(e) => log::error!("netstack egress: {e}"),
                     }
@@ -388,6 +421,7 @@ fn engine_main(
                             if stack_sink.send(buf[..n].to_vec()).await.is_err() {
                                 break;
                             }
+                            INGRESS_PKTS.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(e) => {
                             log::error!("tun read: {e}");
@@ -420,13 +454,51 @@ fn engine_main(
             tokio::spawn(udp_dispatch(udp_read, reply_tx, mode.clone(), registry.clone()));
         }
 
+        // FAIL-OPEN WATCHDOG. If the datapath wedges under load (smoltcp stuck "device exhausted",
+        // egress task dead) the tunnel stays up but forwards nothing -> internet blackhole that
+        // survives closing the app (foreground service). Detect it as: packets keep arriving from the
+        // tun (ingress advancing) while NOTHING goes back out (egress flat) across two windows, then
+        // notify Kotlin to tear the tunnel down (restore internet, unfiltered). Asymmetric by design:
+        // a pure download has high egress, a pure upload still emits ACKs (egress != 0), and idle has
+        // ~0 ingress — so only a true wedge (ingress flowing, egress frozen) trips it.
+        tokio::spawn(async move {
+            let mut last_in = INGRESS_PKTS.load(Ordering::Relaxed);
+            let mut last_eg = EGRESS_PKTS.load(Ordering::Relaxed);
+            let mut strikes = 0u32;
+            loop {
+                tokio::time::sleep(Duration::from_secs(WATCHDOG_SECS)).await;
+                let now_in = INGRESS_PKTS.load(Ordering::Relaxed);
+                let now_eg = EGRESS_PKTS.load(Ordering::Relaxed);
+                let stalled = now_in.wrapping_sub(last_in) >= WATCHDOG_MIN_INGRESS && now_eg == last_eg;
+                last_in = now_in;
+                last_eg = now_eg;
+                if stalled {
+                    strikes += 1;
+                    log::warn!("watchdog: datapath stall suspected ({strikes}/{WATCHDOG_STRIKES})");
+                    if strikes >= WATCHDOG_STRIKES {
+                        log::error!("watchdog: datapath wedged -> failing open (tearing tunnel down)");
+                        report_stall();
+                        break;
+                    }
+                } else {
+                    strikes = 0;
+                }
+            }
+        });
+
         log::info!("engine_main: datapath running; awaiting stop signal");
         let _ = stop_rx.await;
         log::info!("engine loop exiting (stop signal received; block_on async block returning)");
     });
-    log::info!("engine_main: block_on returned; dropping tokio runtime (this drops tasks -> drops Tun -> closes tun fd)");
-    drop(rt);
-    log::info!("engine_main: runtime dropped; engine_main RETURNING (thread will now exit)");
+    log::info!("engine_main: block_on returned; shutting down runtime");
+    // Make sure the interface is down even if a task is wedged (e.g. the smoltcp runner busy-spinning
+    // on "device exhausted" under load won't drop the Tun on its own).
+    close_tun_fd();
+    // BOUNDED shutdown: a busy-spinning async task has no await point to cancel at, so a plain
+    // drop(rt) could block this thread (-> nativeStop's join -> main-thread ANR). shutdown_timeout
+    // forces the runtime down within the budget so engine_main always returns promptly.
+    rt.shutdown_timeout(Duration::from_millis(500));
+    log::info!("engine_main: runtime shut down; engine_main RETURNING (thread will now exit)");
 }
 
 // ---------------------------------------------------------------------------
@@ -721,16 +793,25 @@ async fn udp_writer(mut writer: UdpWriteHalf, mut rx: mpsc::Receiver<UdpMsg>) {
 // tun device (async over the raw fd)
 // ---------------------------------------------------------------------------
 
+/// Non-owning fd wrapper: gives AsyncFd an AsRawFd to register with epoll WITHOUT closing the fd on
+/// drop. The fd is closed exactly once via `close_tun_fd()` (from the stop path or `Tun::drop`), so
+/// teardown is deterministic and never double-closes.
+struct RawTun(RawFd);
+impl AsRawFd for RawTun {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
+
 struct Tun {
-    fd: AsyncFd<OwnedFd>,
+    fd: AsyncFd<RawTun>,
 }
 
 impl Drop for Tun {
     fn drop(&mut self) {
-        // KEY teardown signal: when this fires the OwnedFd closes the tun fd and the OS VPN
-        // interface comes down. If we STOP but never see this line, the fd leaked -> tunnel
-        // stays up -> "still filtering until process killed".
-        log::info!("Tun::drop — closing tun fd {}", self.fd.get_ref().as_raw_fd());
+        // Normal-path closer (the stop path may have already closed it; close_tun_fd is idempotent).
+        log::info!("Tun::drop");
+        close_tun_fd();
     }
 }
 
@@ -746,9 +827,9 @@ impl Tun {
                 return Err(std::io::Error::last_os_error());
             }
         }
-        let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+        TUN_FD.store(raw, Ordering::SeqCst);
         Ok(Self {
-            fd: AsyncFd::new(owned)?,
+            fd: AsyncFd::new(RawTun(raw))?,
         })
     }
 
@@ -800,7 +881,7 @@ fn protect_fd(fd: RawFd) -> bool {
     let (Some(vm), Some(class_ref)) = (JVM.get(), BRIDGE_CLASS.get()) else {
         return false;
     };
-    let mut env = match vm.attach_current_thread() {
+    let mut env = match vm.attach_current_thread_as_daemon() {
         Ok(e) => e,
         Err(e) => {
             log::error!("attach (protect): {e}");
@@ -822,7 +903,7 @@ fn decide_flow(proto: jint, src: SocketAddr, dst: SocketAddr) -> i32 {
     let (Some(vm), Some(class_ref)) = (JVM.get(), BRIDGE_CLASS.get()) else {
         return VERDICT_ALLOW;
     };
-    let mut env = match vm.attach_current_thread() {
+    let mut env = match vm.attach_current_thread_as_daemon() {
         Ok(e) => e,
         Err(_) => return VERDICT_ALLOW,
     };
@@ -860,7 +941,7 @@ fn report_dns(host: &str, ip: &str) {
     let (Some(vm), Some(class_ref)) = (JVM.get(), BRIDGE_CLASS.get()) else {
         return;
     };
-    let mut env = match vm.attach_current_thread() {
+    let mut env = match vm.attach_current_thread_as_daemon() {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -884,7 +965,7 @@ fn is_blocked_host(name: &str) -> bool {
     let (Some(vm), Some(class_ref)) = (JVM.get(), BRIDGE_CLASS.get()) else {
         return false;
     };
-    let mut env = match vm.attach_current_thread() {
+    let mut env = match vm.attach_current_thread_as_daemon() {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -898,6 +979,21 @@ fn is_blocked_host(name: &str) -> bool {
         .and_then(|v| v.z());
     let _ = env.exception_clear();
     res.unwrap_or(false)
+}
+
+/// Tell Kotlin (`NativeBridge.onStall`) the datapath has wedged so it can fail open (tear the tunnel
+/// down -> restore internet). Called from the watchdog on a tokio worker thread.
+fn report_stall() {
+    let (Some(vm), Some(class_ref)) = (JVM.get(), BRIDGE_CLASS.get()) else {
+        return;
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_raw()) };
+    let _ = env.call_static_method(class, "onStall", "()V", &[]);
+    let _ = env.exception_clear();
 }
 
 /// Parse a DNS *query* and return the first question's name (None if not a query / malformed).
@@ -1143,24 +1239,42 @@ fn set_log_level(level: i32) {
 /// real gate is `log::set_max_level`, so the level can change without restarting the process.
 /// Default is OFF — a shipped build logs nothing and never leaks browsing destinations to logcat
 /// unless a tech-savvy user opts in. FULL logs connection hostnames (that's its purpose).
+/// Wraps android_logger and HARD-DROPS noisy netstack records. smoltcp emits a per-packet
+/// `debug!("failed to transmit IP: device exhausted")` (target `smoltcp::iface::interface`) that under
+/// sustained high throughput hits tens of thousands of lines/sec — enough to flood logcat and stall
+/// the app at FULL diagnostics. The env_filter on android_logger's Config did NOT suppress it in
+/// practice, so we filter by target here, in our own logger, which is bulletproof. Our own
+/// firewall_core/qopsec records pass through; the live OFF/SIMPLE/FULL gate is still log::max_level().
+struct FilteredLogger(android_logger::AndroidLogger);
+impl log::Log for FilteredLogger {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        if m.target().starts_with("smoltcp") || m.target().starts_with("netstack_smoltcp") {
+            return m.level() <= log::Level::Warn && self.0.enabled(m);
+        }
+        self.0.enabled(m)
+    }
+    fn log(&self, r: &log::Record) {
+        let t = r.target();
+        if (t.starts_with("smoltcp") || t.starts_with("netstack_smoltcp")) && r.level() > log::Level::Warn {
+            return;
+        }
+        self.0.log(r);
+    }
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
 fn init_log(level: i32) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        // Cap smoltcp/netstack at Warn regardless of our level: under sustained high throughput
-        // smoltcp emits a per-packet `debug!("failed to transmit IP: device exhausted")` that can
-        // hit ~170k lines/sec, which floods logcat and can stall the app at FULL diagnostics. Our
-        // own firewall_core/qopsec logs (default Trace here) are unaffected; the live OFF/SIMPLE/FULL
-        // gate is still log::set_max_level() below.
-        let mut fb = env_filter::Builder::new();
-        fb.filter_level(log::LevelFilter::Trace)
-            .filter_module("smoltcp", log::LevelFilter::Warn)
-            .filter_module("netstack_smoltcp", log::LevelFilter::Warn);
-        android_logger::init_once(
+        let inner = android_logger::AndroidLogger::new(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Debug)
-                .with_tag("firewall_core")
-                .with_filter(fb.build()),
+                .with_tag("firewall_core"),
         );
+        // Ignore the error if a logger was somehow already set; the gate below still applies.
+        let _ = log::set_boxed_logger(Box::new(FilteredLogger(inner)));
     });
     set_log_level(level);
 }

@@ -76,6 +76,7 @@ class VpnFirewallService : VpnService() {
         private const val PROMPT_CHANNEL_ID = "prompts"
         private const val NOTIF_ID = 1
         private const val REVOKE_NOTIF_ID = 3
+        private const val STALL_NOTIF_ID = 4
         private const val PROMPT_NOTIF_BASE = 2_000_000   // keep prompt ids clear of NOTIF_ID
         private const val MTU = 1500
         private const val READ_BUF = 32_767
@@ -98,6 +99,7 @@ class VpnFirewallService : VpnService() {
     private val blockList by lazy { BlockList.get(this) }
     private val appPolicy by lazy { AppPolicy.get(this) }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     // Apps with an outstanding prompt — coalesces to one notification per app.
     private val pendingApps = java.util.Collections.synchronizedSet(HashSet<Int>())
@@ -205,6 +207,7 @@ class VpnFirewallService : VpnService() {
         NativeBridge.blockHostChecker = { host ->
             settings.adBlock.value && blockList.isBlocked(host)
         }
+        NativeBridge.staller = { onDatapathStall() }
         BlocklistManager.get(this)   // ensure subscribed lists are merged (e.g. boot-lock path)
         UserDomains.get(this)        // ensure custom-block + allowlist exceptions are merged too
         // detachFd transfers ownership: the PFD won't close the fd; the core will.
@@ -502,6 +505,7 @@ class VpnFirewallService : VpnService() {
         NativeBridge.decider = null
         NativeBridge.dnsSink = null
         NativeBridge.blockHostChecker = null
+        NativeBridge.staller = null
         unregisterNetworkCallback()
         ipv6Fwd = null
         clearPrompts()
@@ -545,6 +549,40 @@ class VpnFirewallService : VpnService() {
             .setAutoCancel(true)
             .build()
         nm.notify(REVOKE_NOTIF_ID, n)
+    }
+
+    /**
+     * Fail-open: the native watchdog reports the datapath wedged (forwarding stalled under load), so
+     * we tear the tunnel down rather than let a dead tunnel blackhole the internet (which would even
+     * survive closing the app, since we're a foreground service). Called from a native thread → hop
+     * to main, then stop cleanly and tell the user. See the watchdog in rust/src/lib.rs.
+     */
+    private fun onDatapathStall() {
+        mainHandler.post {
+            if (nativeHandle == 0L) return@post   // already stopping
+            Diag.life("onDatapathStall: datapath wedged -> failing open (tearing tunnel down)")
+            notifyStalled()
+            stopCapture()
+        }
+    }
+
+    private fun notifyStalled() {
+        val nm = getSystemService(NotificationManager::class.java)
+        createPromptChannel(nm)
+        val openApp = PendingIntent.getActivity(
+            this, 21,
+            Intent(this, com.qopsec.firewall.MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val n = NotificationCompat.Builder(this, PROMPT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_shield)
+            .setContentTitle("Firewall stopped")
+            .setContentText("Filtering stalled under heavy traffic — stopped to keep your internet working. Tap to restart.")
+            .setContentIntent(openApp)
+            .setAutoCancel(true)
+            .build()
+        nm.notify(STALL_NOTIF_ID, n)
     }
 
     override fun onDestroy() {

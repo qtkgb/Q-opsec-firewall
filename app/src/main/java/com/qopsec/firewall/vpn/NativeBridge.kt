@@ -45,6 +45,15 @@ object NativeBridge {
     @JvmField
     var blockHostChecker: ((host: String) -> Boolean)? = null
 
+    /**
+     * Set by the service. Called from the native watchdog when the datapath has wedged (forwarding
+     * stalled under load). The service fails open — tears the tunnel down so internet is restored
+     * rather than blackholed. Called on a native thread; the handler must hop to the main thread.
+     */
+    @Volatile
+    @JvmField
+    var staller: (() -> Unit)? = null
+
     private external fun nativeVersion(): String
 
     /** [logLevel]: 0 off / 1 info (lifecycle) / 2 debug (per-connection). See DiagLevel.toNative(). */
@@ -82,4 +91,9 @@ object NativeBridge {
 
     @JvmStatic
     fun isBlockedHost(host: String): Boolean = blockHostChecker?.invoke(host) ?: false
+
+    @JvmStatic
+    fun onStall() {
+        staller?.invoke()
+    }
 }
