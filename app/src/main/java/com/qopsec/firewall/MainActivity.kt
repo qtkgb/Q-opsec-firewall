@@ -98,6 +98,7 @@ class MainActivity : FragmentActivity() {
                         onStop = ::stopCaptureService,
                         onKill = ::setKill,
                         onSettings = { showSettings = true },
+                        onClose = ::closeApp,
                     )
                 }
 
@@ -191,6 +192,27 @@ class MainActivity : FragmentActivity() {
         startService(
             Intent(this, VpnFirewallService::class.java).setAction(VpnFirewallService.ACTION_STOP)
         )
+    }
+
+    /**
+     * "Close" button: stop the firewall cleanly, then HARD-KILL our own process. Process death forces
+     * the OS to release the tun + end the VpnService session unconditionally — the strongest teardown a
+     * no-root app can do, and the manual recovery for the rare post-gigabit-speedtest stuck-tunnel state
+     * (where the engine wedged and a normal Stop can't fully reset the OS networking). The 700 ms delay
+     * lets stopCapture() run its clean teardown (close tun fd, stopSelf) before the kill backstops it.
+     */
+    private fun closeApp() {
+        Diag.life("MainActivity.closeApp: user tapped Close -> stop firewall + kill process")
+        runCatching {
+            startService(
+                Intent(this, VpnFirewallService::class.java).setAction(VpnFirewallService.ACTION_STOP)
+            )
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            finishAndRemoveTask()
+            android.os.Process.killProcess(android.os.Process.myPid())
+            kotlin.system.exitProcess(0)
+        }, 700)
     }
 
     private fun setKill(on: Boolean) {

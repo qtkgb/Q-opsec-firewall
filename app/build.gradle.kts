@@ -24,8 +24,8 @@ android {
         applicationId = "com.qopsec.firewall"
         minSdk = 29          // Android 10 — floor for getConnectionOwnerUid (Phase 1)
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.1.12"
+        versionCode = 16
+        versionName = "1.1.13"
     }
 
     signingConfigs {

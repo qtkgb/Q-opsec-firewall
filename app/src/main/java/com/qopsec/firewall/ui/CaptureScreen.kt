@@ -81,6 +81,7 @@ fun CaptureScreen(
     onStop: () -> Unit,
     onKill: (Boolean) -> Unit,
     onSettings: () -> Unit,
+    onClose: () -> Unit,
 ) {
     val context = LocalContext.current
     val repo = remember { RuleRepository.get(context) }
@@ -101,6 +102,9 @@ fun CaptureScreen(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
                 )
+                TextButton(onClick = onClose) {
+                    Text("Close", color = LocalStatusPalette.current.blocked)
+                }
                 TextButton(onClick = onSettings) { Text("Settings") }
             }
             Text(
