@@ -141,6 +141,10 @@ interface RuleDao {
     )
     suspend fun healSiblingsOf(proto: Int, ip: String, port: Int, host: String?)
 
+    /** All recorded flows for one app, for the per-app connection export. */
+    @Query("SELECT * FROM conn_log WHERE appUid = :uid ORDER BY dstHost IS NULL, dstHost, dstIp, dstPort")
+    suspend fun connsForUidOnce(uid: Int): List<ConnLog>
+
     // --- legacy "root" rows (kernel's uid-0 TIME_WAIT artifact) fold into "unknown" ---
     // The lookup no longer surfaces uid 0, but rows written by older versions carry it, and the
     // UI groups by uid — so uid-0 rows must become uid -1 (dropping any that already have a -1

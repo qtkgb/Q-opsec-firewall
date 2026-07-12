@@ -51,6 +51,9 @@ class RuleRepository private constructor(private val dao: RuleDao) {
 
     fun clearConn() = scope.launch { dao.clearConn() }
 
+    /** All recorded flows for one app (per-app connection export). */
+    suspend fun connsForUid(uid: Int): List<ConnLog> = dao.connsForUidOnce(uid)
+
     /** Drop root/unknown history rows whose destination also exists under a real app. */
     suspend fun healMisattributedConns(): Int {
         dao.dropUidZeroTwins()

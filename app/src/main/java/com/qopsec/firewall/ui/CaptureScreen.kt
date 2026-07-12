@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +65,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.sample
 import com.qopsec.firewall.R
+import com.qopsec.firewall.data.ConnExporter
+import kotlinx.coroutines.launch
 import com.qopsec.firewall.data.ConnLog
 import com.qopsec.firewall.data.BlockList
 import com.qopsec.firewall.data.Rule
@@ -524,7 +528,22 @@ private fun AppGroupRow(
                 )
             }
             StatusPill(status)
-            Spacer(Modifier.width(8.dp))
+            // ↓ = export this app's full connection list as a text file (share sheet) — a long
+            // destination list is easier to assess off-device than by expanding row by row.
+            val ctx = LocalContext.current
+            val exportScope = rememberCoroutineScope()
+            TextButton(
+                onClick = {
+                    exportScope.launch {
+                        val f = ConnExporter.export(ctx, app.uid, app.packageName, app.label ?: "unknown")
+                        ConnExporter.share(ctx, f, app.label ?: "unknown")
+                    }
+                },
+                contentPadding = PaddingValues(horizontal = 6.dp),
+                modifier = Modifier.width(34.dp),
+            ) {
+                Text("↓", fontWeight = FontWeight.Bold)
+            }
             // Symmetric toggle: both directions write an explicit rule (visible in Rules),
             // so Connections and Rules always agree. Remove a rule via the Rules tab.
             TextButton(onClick = {
