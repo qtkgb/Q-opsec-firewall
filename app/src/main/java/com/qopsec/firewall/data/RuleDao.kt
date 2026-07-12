@@ -124,4 +124,15 @@ interface RuleDao {
             "AND c2.dstIp = conn_log.dstIp AND c2.dstPort = conn_log.dstPort)",
     )
     suspend fun healMisattributedConns(): Int
+
+    /** True if this destination already has a row attributed to a real app. */
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM conn_log WHERE appUid > 0 AND proto = :proto " +
+            "AND dstIp = :ip AND dstPort = :port)",
+    )
+    suspend fun hasAttributedSibling(proto: Int, ip: String, port: Int): Boolean
+
+    /** Live heal: drop root/unknown rows for a destination just seen under a real app. */
+    @Query("DELETE FROM conn_log WHERE appUid <= 0 AND proto = :proto AND dstIp = :ip AND dstPort = :port")
+    suspend fun healSiblingsOf(proto: Int, ip: String, port: Int)
 }

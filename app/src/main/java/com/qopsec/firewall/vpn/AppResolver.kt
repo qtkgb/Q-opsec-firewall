@@ -21,8 +21,8 @@ import java.util.concurrent.ConcurrentHashMap
 class AppResolver(context: Context) {
 
     companion object {
-        private const val UID_LOOKUP_ATTEMPTS = 3
-        private const val UID_RETRY_DELAY_MS = 5L
+        private const val UID_LOOKUP_ATTEMPTS = 4
+        private const val UID_RETRY_DELAY_MS = 5L   // progressive: 5/10/15 ms between attempts
     }
 
     private val cm = context.getSystemService(ConnectivityManager::class.java)
@@ -50,7 +50,7 @@ class AppResolver(context: Context) {
         // next packet gets another chance instead of being branded root/unknown forever.
         var uid = ConnectionEvent.INVALID_UID
         for (attempt in 0 until UID_LOOKUP_ATTEMPTS) {
-            if (attempt > 0) SystemClock.sleep(UID_RETRY_DELAY_MS)
+            if (attempt > 0) SystemClock.sleep(UID_RETRY_DELAY_MS * attempt)
             uid = try {
                 cm.getConnectionOwnerUid(proto, src, dst)
             } catch (e: Exception) {

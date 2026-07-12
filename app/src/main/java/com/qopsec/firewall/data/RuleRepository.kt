@@ -35,11 +35,18 @@ class RuleRepository private constructor(private val dao: RuleDao) {
     /** Durable connection history (latest 1000), for the Connections view. */
     val connLog: Flow<List<ConnLog>> = dao.connLog()
 
-    /** Record/refresh a connection in the persistent history (one row per distinct flow). */
+    /**
+     * Record/refresh a connection in the persistent history (one row per distinct flow).
+     * Misattribution guard (a lost uid-lookup race labels flows root/unknown): never create a
+     * root/unknown row for a destination already known under a real app, and when a destination
+     * is recorded under a real app, drop any root/unknown rows for it — live, not just at start.
+     */
     suspend fun recordConn(c: ConnLog) {
+        if (c.appUid <= 0 && dao.hasAttributedSibling(c.proto, c.dstIp, c.dstPort)) return
         if (dao.touchConn(c.flowKey, c.ts, c.dstHost, c.appLabel, c.ipVersion) == 0) {
             runCatching { dao.insertConn(c) }   // tolerate a unique-key race
         }
+        if (c.appUid > 0) dao.healSiblingsOf(c.proto, c.dstIp, c.dstPort)
     }
 
     fun clearConn() = scope.launch { dao.clearConn() }
