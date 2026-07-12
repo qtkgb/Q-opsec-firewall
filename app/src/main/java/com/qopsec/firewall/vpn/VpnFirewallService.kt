@@ -32,6 +32,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.IOException
@@ -64,6 +65,9 @@ class VpnFirewallService : VpnService() {
         const val EXTRA_BOOT_LOCK = "boot_lock"
         // Min interval between conn_log row refreshes for the same flow (see lastConnWrite).
         private const val CONN_WRITE_THROTTLE_MS = 2000L
+        // Re-query delays for flows whose uid lookup failed at SYN time (socket is established
+        // and registered by then; second chance covers short-lived flows caught in TIME_WAIT).
+        private val REATTRIBUTE_DELAYS_MS = longArrayOf(400L, 1600L)
         private const val EXTRA_UID = "uid"
         private const val EXTRA_PKG = "pkg"
         private const val EXTRA_LABEL = "label"
@@ -387,6 +391,35 @@ class VpnFirewallService : VpnService() {
                         dstPort = dstPort,
                     )
                 )
+            }
+            // A lost uid-lookup race at SYN time labels the flow root/unknown, and if this exact
+            // destination is never re-seen under the real app (CDN IPs rotate) the wrong row would
+            // stick. The app's socket outlives the race, so re-query shortly and record the flow
+            // under its real owner — recordConn's live heal then deletes the root/unknown row.
+            if (uid <= 0) scope.launch {
+                for (wait in REATTRIBUTE_DELAYS_MS) {
+                    delay(wait)
+                    val lateUid = resolver.ownerUid(probe)
+                    if (lateUid > 0) {
+                        val latePkg = resolver.packageOf(lateUid)
+                        rules.recordConn(
+                            ConnLog(
+                                flowKey = "$lateUid|$proto|$dstIp|$dstPort",
+                                ts = now,
+                                appUid = lateUid,
+                                appLabel = resolver.label(lateUid),
+                                packageName = latePkg,
+                                proto = proto,
+                                ipVersion = if (dstIp.contains(':')) 6 else 4,
+                                dstIp = dstIp,
+                                dstHost = host,
+                                dstPort = dstPort,
+                            )
+                        )
+                        Diag.flow("reattributed $l4 $dstIp:$dstPort host=${host ?: "-"} -> ${latePkg ?: lateUid}")
+                        break
+                    }
+                }
             }
         }
         return action

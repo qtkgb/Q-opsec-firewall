@@ -120,19 +120,24 @@ interface RuleDao {
      */
     @Query(
         "DELETE FROM conn_log WHERE appUid <= 0 AND EXISTS (" +
-            "SELECT 1 FROM conn_log c2 WHERE c2.appUid > 0 AND c2.proto = conn_log.proto " +
-            "AND c2.dstIp = conn_log.dstIp AND c2.dstPort = conn_log.dstPort)",
+            "SELECT 1 FROM conn_log c2 WHERE c2.appUid > 0 AND c2.dstPort = conn_log.dstPort " +
+            "AND ((c2.proto = conn_log.proto AND c2.dstIp = conn_log.dstIp) " +
+            "OR (conn_log.dstHost IS NOT NULL AND c2.dstHost = conn_log.dstHost)))",
     )
     suspend fun healMisattributedConns(): Int
 
-    /** True if this destination already has a row attributed to a real app. */
+    /** True if this destination (by exact IP, or by hostname — CDNs rotate IPs) already has a
+     *  row attributed to a real app. */
     @Query(
-        "SELECT EXISTS(SELECT 1 FROM conn_log WHERE appUid > 0 AND proto = :proto " +
-            "AND dstIp = :ip AND dstPort = :port)",
+        "SELECT EXISTS(SELECT 1 FROM conn_log WHERE appUid > 0 AND dstPort = :port " +
+            "AND ((proto = :proto AND dstIp = :ip) OR (:host IS NOT NULL AND dstHost = :host)))",
     )
-    suspend fun hasAttributedSibling(proto: Int, ip: String, port: Int): Boolean
+    suspend fun hasAttributedSibling(proto: Int, ip: String, port: Int, host: String?): Boolean
 
     /** Live heal: drop root/unknown rows for a destination just seen under a real app. */
-    @Query("DELETE FROM conn_log WHERE appUid <= 0 AND proto = :proto AND dstIp = :ip AND dstPort = :port")
-    suspend fun healSiblingsOf(proto: Int, ip: String, port: Int)
+    @Query(
+        "DELETE FROM conn_log WHERE appUid <= 0 AND dstPort = :port " +
+            "AND ((proto = :proto AND dstIp = :ip) OR (:host IS NOT NULL AND dstHost = :host))",
+    )
+    suspend fun healSiblingsOf(proto: Int, ip: String, port: Int, host: String?)
 }

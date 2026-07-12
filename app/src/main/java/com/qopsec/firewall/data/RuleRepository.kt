@@ -42,11 +42,11 @@ class RuleRepository private constructor(private val dao: RuleDao) {
      * is recorded under a real app, drop any root/unknown rows for it — live, not just at start.
      */
     suspend fun recordConn(c: ConnLog) {
-        if (c.appUid <= 0 && dao.hasAttributedSibling(c.proto, c.dstIp, c.dstPort)) return
+        if (c.appUid <= 0 && dao.hasAttributedSibling(c.proto, c.dstIp, c.dstPort, c.dstHost)) return
         if (dao.touchConn(c.flowKey, c.ts, c.dstHost, c.appLabel, c.ipVersion) == 0) {
             runCatching { dao.insertConn(c) }   // tolerate a unique-key race
         }
-        if (c.appUid > 0) dao.healSiblingsOf(c.proto, c.dstIp, c.dstPort)
+        if (c.appUid > 0) dao.healSiblingsOf(c.proto, c.dstIp, c.dstPort, c.dstHost)
     }
 
     fun clearConn() = scope.launch { dao.clearConn() }
