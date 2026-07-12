@@ -8,13 +8,15 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [Rule::class, RuleChange::class, ConnLog::class, Snapshot::class],
-    version = 5,
+    entities = [Rule::class, RuleChange::class, ConnLog::class, Snapshot::class, UsageBucket::class],
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun ruleDao(): RuleDao
+
+    abstract fun usageDao(): UsageDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null
@@ -68,13 +70,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // v6: hourly traffic-usage buckets for the Stats tab.
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `usage_bucket` (" +
+                        "`hourStart` INTEGER PRIMARY KEY NOT NULL, " +
+                        "`wifiRx` INTEGER NOT NULL, `wifiTx` INTEGER NOT NULL, " +
+                        "`mobileRx` INTEGER NOT NULL, `mobileTx` INTEGER NOT NULL)"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "qopsec.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build().also { INSTANCE = it }
             }
     }

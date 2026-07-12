@@ -144,6 +144,9 @@ fun CaptureScreen(
                     Tab(selected = tab == 2, onClick = { tab = 2 }, icon = {
                         Icon(painterResource(R.drawable.ic_tab_trash), contentDescription = "Trash", tint = tabBlue)
                     })
+                    Tab(selected = tab == 3, onClick = { tab = 3 }, icon = {
+                        Icon(painterResource(R.drawable.ic_tab_stats), contentDescription = "Stats", tint = tabBlue)
+                    })
                 }
                 // Search toggle sits next to the tabs; only Connections is searchable. Tap to
                 // reveal the search/filter panel, tap again (or ✕) to give the list full height.
@@ -163,7 +166,8 @@ fun CaptureScreen(
                 when (tab) {
                     0 -> ConnectionsTab(repo, searchOpen)
                     1 -> RulesTab(repo)
-                    else -> TrashTab(repo)
+                    2 -> TrashTab(repo)
+                    else -> StatsTab()
                 }
             }
         }

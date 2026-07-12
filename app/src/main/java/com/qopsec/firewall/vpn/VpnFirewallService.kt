@@ -103,6 +103,7 @@ class VpnFirewallService : VpnService() {
     private val settings by lazy { com.qopsec.firewall.data.Settings.get(this) }
     private val blockList by lazy { BlockList.get(this) }
     private val appPolicy by lazy { AppPolicy.get(this) }
+    private val trafficSampler by lazy { TrafficSampler(this) }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -188,6 +189,9 @@ class VpnFirewallService : VpnService() {
             val healed = rules.healMisattributedConns()
             if (healed > 0) Diag.life("conn_log: healed $healed misattributed row(s)")
         }
+
+        // Stats tab: meter the tunnel's traffic while it runs.
+        trafficSampler.start(scope)
 
         if (NativeBridge.available) {
             startNativeForwarding(pfd)
@@ -548,6 +552,7 @@ class VpnFirewallService : VpnService() {
         NativeBridge.dnsSink = null
         NativeBridge.blockHostChecker = null
         NativeBridge.staller = null
+        trafficSampler.stop()
         unregisterNetworkCallback()
         ipv6Fwd = null
         clearPrompts()
