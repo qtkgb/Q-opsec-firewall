@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.os.Process
+import android.os.SystemClock
 import android.system.OsConstants
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -18,6 +19,11 @@ import java.util.concurrent.ConcurrentHashMap
  * binder call per new flow.
  */
 class AppResolver(context: Context) {
+
+    companion object {
+        private const val UID_LOOKUP_ATTEMPTS = 3
+        private const val UID_RETRY_DELAY_MS = 5L
+    }
 
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     private val pm: PackageManager = context.packageManager
@@ -35,16 +41,26 @@ class AppResolver(context: Context) {
         uidByFlow[flowKey]?.let { return it }
 
         val proto = if (event.protocol == L4.TCP) OsConstants.IPPROTO_TCP else OsConstants.IPPROTO_UDP
-        val uid = try {
-            cm.getConnectionOwnerUid(
-                proto,
-                InetSocketAddress(InetAddress.getByName(event.srcIp), event.srcPort),
-                InetSocketAddress(InetAddress.getByName(event.dstIp), event.dstPort),
-            )
-        } catch (e: Exception) {
-            ConnectionEvent.INVALID_UID
+        val src = InetSocketAddress(InetAddress.getByName(event.srcIp), event.srcPort)
+        val dst = InetSocketAddress(InetAddress.getByName(event.dstIp), event.dstPort)
+
+        // The kernel's socket table may not have the app's socket yet when we see its first
+        // SYN (connection bursts lose this race and come back as -1, or 0 while the socket is
+        // still kernel-owned) — retry briefly, and never cache a failed lookup so the flow's
+        // next packet gets another chance instead of being branded root/unknown forever.
+        var uid = ConnectionEvent.INVALID_UID
+        for (attempt in 0 until UID_LOOKUP_ATTEMPTS) {
+            if (attempt > 0) SystemClock.sleep(UID_RETRY_DELAY_MS)
+            uid = try {
+                cm.getConnectionOwnerUid(proto, src, dst)
+            } catch (e: Exception) {
+                ConnectionEvent.INVALID_UID
+            }
+            if (uid > 0) {
+                uidByFlow[flowKey] = uid
+                break
+            }
         }
-        uidByFlow[flowKey] = uid
         return uid
     }
 

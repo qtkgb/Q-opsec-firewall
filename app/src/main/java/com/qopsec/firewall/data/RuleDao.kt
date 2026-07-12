@@ -112,4 +112,16 @@ interface RuleDao {
     /** Bound the history table to the [keep] most-recent rows. */
     @Query("DELETE FROM conn_log WHERE id NOT IN (SELECT id FROM conn_log ORDER BY ts DESC LIMIT :keep)")
     suspend fun trimConn(keep: Int)
+
+    /**
+     * Heal misattributed history: drop root/unknown rows (appUid <= 0, a lost uid-lookup race)
+     * whose destination was also seen under a real app — the correctly-attributed row is the
+     * same flow, re-resolved. Genuinely unattributable flows (no real-uid sibling) are kept.
+     */
+    @Query(
+        "DELETE FROM conn_log WHERE appUid <= 0 AND EXISTS (" +
+            "SELECT 1 FROM conn_log c2 WHERE c2.appUid > 0 AND c2.proto = conn_log.proto " +
+            "AND c2.dstIp = conn_log.dstIp AND c2.dstPort = conn_log.dstPort)",
+    )
+    suspend fun healMisattributedConns(): Int
 }

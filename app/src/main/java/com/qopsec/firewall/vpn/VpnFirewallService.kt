@@ -176,6 +176,14 @@ class VpnFirewallService : VpnService() {
         CaptureLog.setRunning(true)
         Diag.life("startCapture: tunnel established (native=${NativeBridge.available}, bootLock=$bootLock)")
 
+        // Heal history rows misattributed to root/unknown by a lost uid-lookup race: once the
+        // same destination is seen under a real app, the stale row is redundant. Every start,
+        // so residual races self-clean (table is capped at 2000 rows — cheap).
+        scope.launch {
+            val healed = rules.healMisattributedConns()
+            if (healed > 0) Diag.life("conn_log: healed $healed misattributed row(s)")
+        }
+
         if (NativeBridge.available) {
             startNativeForwarding(pfd)
         } else {

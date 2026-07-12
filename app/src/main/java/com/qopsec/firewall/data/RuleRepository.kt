@@ -44,6 +44,9 @@ class RuleRepository private constructor(private val dao: RuleDao) {
 
     fun clearConn() = scope.launch { dao.clearConn() }
 
+    /** Drop root/unknown history rows whose destination also exists under a real app. */
+    suspend fun healMisattributedConns(): Int = dao.healMisattributedConns()
+
     // --- snapshots / restore points ---
 
     val snapshots: Flow<List<Snapshot>> = dao.snapshots()
