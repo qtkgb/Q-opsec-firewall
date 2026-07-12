@@ -8,6 +8,7 @@ import android.net.NetworkRequest
 import android.net.TrafficStats
 import android.os.Process
 import com.qopsec.firewall.data.AppDatabase
+import com.qopsec.firewall.data.Diag
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -33,6 +34,13 @@ class TrafficSampler(context: Context) {
         private const val SAMPLE_MS = 2000L
         const val HOUR_MS = 3_600_000L
         private const val RETENTION_MS = 400L * 24 * HOUR_MS   // ~13 months of hourly rows
+        private const val SUMMARY_EVERY = 30                   // samples per FULL-diag summary (~60s)
+
+        private fun fmt(b: Long): String = when {
+            b >= 1L shl 20 -> String.format(java.util.Locale.US, "%.1f MB", b / 1048576.0)
+            b >= 1L shl 10 -> String.format(java.util.Locale.US, "%.1f KB", b / 1024.0)
+            else -> "$b B"
+        }
     }
 
     private val app = context.applicationContext
@@ -73,10 +81,15 @@ class TrafficSampler(context: Context) {
         netCallback = cb
 
         job = scope.launch {
+            Diag.life("stats sampler started (uid=$ownUid)")
             dao.trim(System.currentTimeMillis() - RETENTION_MS)
             // Baseline = counters at start, so only bytes moved while running are counted.
             var lastRx = TrafficStats.getUidRxBytes(ownUid)
             var lastTx = TrafficStats.getUidTxBytes(ownUid)
+            // FULL-diag summary accumulators (byte counts only — no hostnames).
+            var sumWifi = 0L
+            var sumMobile = 0L
+            var samples = 0
             while (true) {
                 delay(SAMPLE_MS)
                 val rx = TrafficStats.getUidRxBytes(ownUid)
@@ -85,14 +98,32 @@ class TrafficSampler(context: Context) {
                 val dTx = (tx - lastTx).coerceAtLeast(0)
                 lastRx = rx
                 lastTx = tx
-                if (dRx == 0L && dTx == 0L) continue
-                val hour = System.currentTimeMillis() / HOUR_MS * HOUR_MS
-                if (wifiUp()) dao.add(hour, dRx, dTx, 0, 0) else dao.add(hour, 0, 0, dRx, dTx)
+                val wifi = wifiUp()
+                if (dRx != 0L || dTx != 0L) {
+                    val hour = System.currentTimeMillis() / HOUR_MS * HOUR_MS
+                    if (wifi) {
+                        dao.add(hour, dRx, dTx, 0, 0)
+                        sumWifi += dRx + dTx
+                    } else {
+                        dao.add(hour, 0, 0, dRx, dTx)
+                        sumMobile += dRx + dTx
+                    }
+                }
+                if (++samples >= SUMMARY_EVERY) {
+                    if (sumWifi > 0 || sumMobile > 0) {
+                        Diag.flow(
+                            "stats: +${fmt(sumWifi)} wifi / +${fmt(sumMobile)} mobile last " +
+                                "${SUMMARY_EVERY * SAMPLE_MS / 1000}s (transport=${if (wifi) "wifi" else "mobile"})",
+                        )
+                    }
+                    sumWifi = 0; sumMobile = 0; samples = 0
+                }
             }
         }
     }
 
     fun stop() {
+        if (job != null) Diag.life("stats sampler stopped")
         job?.cancel()
         job = null
         netCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
