@@ -104,6 +104,7 @@ class VpnFirewallService : VpnService() {
     private val blockList by lazy { BlockList.get(this) }
     private val appPolicy by lazy { AppPolicy.get(this) }
     private val trafficSampler by lazy { TrafficSampler(this) }
+    private val usageDao by lazy { com.qopsec.firewall.data.AppDatabase.get(this).usageDao() }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -225,6 +226,9 @@ class VpnFirewallService : VpnService() {
             settings.adBlock.value && blockList.isBlocked(host)
         }
         NativeBridge.staller = { onDatapathStall() }
+        NativeBridge.bytesSink = { proto, srcIp, srcPort, dstIp, dstPort, rx, tx ->
+            onFlowBytes(proto, srcIp, srcPort, dstIp, dstPort, rx, tx)
+        }
         BlocklistManager.get(this)   // ensure subscribed lists are merged (e.g. boot-lock path)
         UserDomains.get(this)        // ensure custom-block + allowlist exceptions are merged too
         // detachFd transfers ownership: the PFD won't close the fd; the core will.
@@ -430,6 +434,23 @@ class VpnFirewallService : VpnService() {
         return action
     }
 
+    /**
+     * Per-flow byte deltas from the Rust core (periodic for long flows + final at flow end),
+     * accumulated into hourly per-app buckets for the Stats tab. The app resolves from the same
+     * 5-tuple decide() used, so it's a cache hit for every attributed flow.
+     */
+    private fun onFlowBytes(
+        proto: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, rx: Long, tx: Long,
+    ) {
+        val l4 = if (proto == 6) L4.TCP else L4.UDP
+        val probe = ConnectionEvent(0L, 0, l4, srcIp, srcPort, dstIp, dstPort)
+        val uid = resolver.ownerUid(probe)
+        val label = resolver.label(uid)
+        val appKey = resolver.packageOf(uid) ?: label
+        val hour = System.currentTimeMillis() / 3_600_000L * 3_600_000L
+        scope.launch { usageDao.addApp(hour, appKey, label, rx, tx) }
+    }
+
     // --- ask-mode prompts ---
 
     /** Post one Allow/Block notification per app (coalesced); off the datapath thread. */
@@ -552,6 +573,7 @@ class VpnFirewallService : VpnService() {
         NativeBridge.dnsSink = null
         NativeBridge.blockHostChecker = null
         NativeBridge.staller = null
+        NativeBridge.bytesSink = null
         trafficSampler.stop()
         unregisterNetworkCallback()
         ipv6Fwd = null

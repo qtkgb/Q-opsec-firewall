@@ -41,6 +41,8 @@ const SNI_PEEK_SECS: u64 = 2;
 /// Fail-open watchdog (engine_main): check interval, the per-window ingress packets that count as
 /// "traffic is flowing", and how many consecutive windows of (ingress flowing, egress frozen) before
 /// we declare the datapath wedged and tear the tunnel down.
+const BYTES_FLUSH_SECS: u64 = 30; // per-flow byte-report cadence (Stats per-app buckets)
+
 const WATCHDOG_SECS: u64 = 3;
 const WATCHDOG_MIN_INGRESS: u64 = 200;
 const WATCHDOG_STRIKES: u32 = 3;
@@ -119,6 +121,117 @@ impl Drop for FlowGuard {
         if let Ok(mut m) = self.reg.lock() {
             m.remove(&self.id);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-flow byte accounting (Stats tab per-app breakdown)
+// ---------------------------------------------------------------------------
+
+/// Live byte counters for one relayed flow, measured at the upstream socket
+/// (read = download, write = upload). A sweeper reports unflushed deltas to Kotlin
+/// every [BYTES_FLUSH_SECS] so long-lived flows land in the right hour bucket;
+/// [ByteGuard] flushes the tail when the flow ends for any reason (including engine
+/// shutdown — dropping an aborted task still runs destructors).
+struct ByteCtr {
+    proto: jint,
+    src: SocketAddr,
+    dst: SocketAddr,
+    rx: AtomicU64,
+    tx: AtomicU64,
+    rep_rx: AtomicU64, // already reported to Kotlin
+    rep_tx: AtomicU64,
+}
+
+impl ByteCtr {
+    fn new(proto: jint, src: SocketAddr, dst: SocketAddr) -> Arc<Self> {
+        Arc::new(Self {
+            proto,
+            src,
+            dst,
+            rx: AtomicU64::new(0),
+            tx: AtomicU64::new(0),
+            rep_rx: AtomicU64::new(0),
+            rep_tx: AtomicU64::new(0),
+        })
+    }
+
+    /// Report bytes not yet reported. `swap` makes concurrent sweeper/drop flushes safe
+    /// (each byte is reported exactly once).
+    fn flush(&self) {
+        let rx = self.rx.load(Ordering::Relaxed);
+        let tx = self.tx.load(Ordering::Relaxed);
+        let d_rx = rx - self.rep_rx.swap(rx, Ordering::Relaxed);
+        let d_tx = tx - self.rep_tx.swap(tx, Ordering::Relaxed);
+        if d_rx > 0 || d_tx > 0 {
+            report_flow_bytes(self.proto, self.src, self.dst, d_rx, d_tx);
+        }
+    }
+}
+
+type ByteRegistry = Arc<Mutex<HashMap<u64, Arc<ByteCtr>>>>;
+
+/// Final flush + deregistration when a flow's task ends.
+struct ByteGuard {
+    id: u64,
+    reg: ByteRegistry,
+    ctr: Arc<ByteCtr>,
+}
+impl Drop for ByteGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.reg.lock() {
+            m.remove(&self.id);
+        }
+        self.ctr.flush();
+    }
+}
+
+/// Counts bytes crossing the wrapped upstream socket.
+struct Counted<'a> {
+    inner: &'a mut tokio::net::TcpStream,
+    ctr: Arc<ByteCtr>,
+}
+
+impl tokio::io::AsyncRead for Counted<'_> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let res = std::pin::Pin::new(&mut *self.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = res {
+            self.ctr.rx.fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        res
+    }
+}
+
+impl tokio::io::AsyncWrite for Counted<'_> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let res = std::pin::Pin::new(&mut *self.inner).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(n)) = res {
+            self.ctr.tx.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        res
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.inner).poll_shutdown(cx)
     }
 }
 
@@ -433,14 +546,36 @@ fn engine_main(
             });
         }
 
+        // Per-flow byte accounting for the Stats per-app breakdown: flows register their
+        // counters here; the sweeper reports deltas so long flows land in the right hour.
+        let bytes: ByteRegistry = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let bytes = bytes.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(BYTES_FLUSH_SECS)).await;
+                    let ctrs: Vec<Arc<ByteCtr>> = match bytes.lock() {
+                        Ok(m) => m.values().cloned().collect(),
+                        Err(_) => continue,
+                    };
+                    for c in ctrs {
+                        c.flush();
+                    }
+                }
+            });
+        }
+
         // TCP: accept terminated connections, relay to protected OS sockets.
         if let Some(mut tcp) = tcp {
             let mode = mode.clone();
             let registry = registry.clone();
+            let bytes = bytes.clone();
             tokio::spawn(async move {
                 while let Some((stream, src, dst)) = tcp.next().await {
                     let id = FLOW_ID.fetch_add(1, Ordering::Relaxed);
-                    tokio::spawn(handle_tcp(id, stream, src, dst, mode.clone(), registry.clone()));
+                    tokio::spawn(handle_tcp(
+                        id, stream, src, dst, mode.clone(), registry.clone(), bytes.clone(),
+                    ));
                 }
                 log::info!("tcp accept task exiting");
             });
@@ -451,7 +586,7 @@ fn engine_main(
             let (udp_read, udp_write) = udp.split();
             let (reply_tx, reply_rx) = mpsc::channel::<UdpMsg>(256);
             tokio::spawn(udp_writer(udp_write, reply_rx));
-            tokio::spawn(udp_dispatch(udp_read, reply_tx, mode.clone(), registry.clone()));
+            tokio::spawn(udp_dispatch(udp_read, reply_tx, mode.clone(), registry.clone(), bytes.clone()));
         }
 
         // FAIL-OPEN WATCHDOG. If the datapath wedges under load (smoltcp stuck "device exhausted",
@@ -512,6 +647,7 @@ async fn handle_tcp(
     dst: SocketAddr,
     mode: Arc<AtomicU8>,
     registry: FlowRegistry,
+    bytes: ByteRegistry,
 ) {
     let cancel = Arc::new(Notify::new());
     let _guard = FlowGuard { id, reg: registry.clone() };
@@ -599,12 +735,20 @@ async fn handle_tcp(
         }
     };
 
+    // Byte accounting: counters live for the flow's lifetime; the guard flushes the tail.
+    let ctr = ByteCtr::new(PROTO_TCP, src, dst);
+    let _bguard = ByteGuard { id, reg: bytes.clone(), ctr: ctr.clone() };
+    if let Ok(mut m) = bytes.lock() {
+        m.insert(id, ctr.clone());
+    }
+
     // Replay the bytes we peeked for SNI (the ClientHello) before relaying the rest.
     if !prebuf.is_empty() {
         if let Err(e) = outbound.write_all(&prebuf).await {
             log::debug!("tcp {dst} prebuf write: {e}");
             return;
         }
+        ctr.tx.fetch_add(prebuf.len() as u64, Ordering::Relaxed);
     }
 
     // Allowed + connected: register Active so a rule change / kill switch can tear it down.
@@ -615,8 +759,9 @@ async fn handle_tcp(
         );
     }
 
+    let mut counted = Counted { inner: &mut outbound, ctr: ctr.clone() };
     tokio::select! {
-        r = tokio::io::copy_bidirectional(&mut inbound, &mut outbound) => {
+        r = tokio::io::copy_bidirectional(&mut inbound, &mut counted) => {
             if let Err(e) = r {
                 log::debug!("tcp relay {dst} ended: {e}");
             }
@@ -637,6 +782,7 @@ async fn udp_dispatch(
     reply_tx: mpsc::Sender<UdpMsg>,
     mode: Arc<AtomicU8>,
     registry: FlowRegistry,
+    bytes: ByteRegistry,
 ) {
     let mut flows: HashMap<(SocketAddr, SocketAddr), mpsc::Sender<Vec<u8>>> = HashMap::new();
 
@@ -683,7 +829,7 @@ async fn udp_dispatch(
         match UdpFlow::new(src, dst).await {
             Ok((tx, flow)) => {
                 let id = FLOW_ID.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(flow.run(id, registry.clone(), reply_tx.clone()));
+                tokio::spawn(flow.run(id, registry.clone(), bytes.clone(), reply_tx.clone()));
                 let _ = tx.send(payload).await;
                 flows.insert(key, tx);
             }
@@ -719,7 +865,13 @@ impl UdpFlow {
         Ok((tx, Self { sock, src, dst, rx }))
     }
 
-    async fn run(mut self, id: u64, registry: FlowRegistry, reply_tx: mpsc::Sender<UdpMsg>) {
+    async fn run(
+        mut self,
+        id: u64,
+        registry: FlowRegistry,
+        bytes: ByteRegistry,
+        reply_tx: mpsc::Sender<UdpMsg>,
+    ) {
         let cancel = Arc::new(Notify::new());
         let _guard = FlowGuard { id, reg: registry.clone() };
         if let Ok(mut m) = registry.lock() {
@@ -734,6 +886,11 @@ impl UdpFlow {
                 },
             );
         }
+        let ctr = ByteCtr::new(PROTO_UDP, self.src, self.dst);
+        let _bguard = ByteGuard { id, reg: bytes.clone(), ctr: ctr.clone() };
+        if let Ok(mut m) = bytes.lock() {
+            m.insert(id, ctr.clone());
+        }
         let mut buf = vec![0u8; 65_535];
         loop {
             tokio::select! {
@@ -742,12 +899,17 @@ impl UdpFlow {
                     break;
                 }
                 outbound = self.rx.recv() => match outbound {
-                    Some(p) => { let _ = self.sock.send(&p).await; }
+                    Some(p) => {
+                        if let Ok(n) = self.sock.send(&p).await {
+                            ctr.tx.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                    }
                     None => break,
                 },
                 resp = self.sock.recv(&mut buf) => match resp {
                     // Reply must look like it came FROM the server TO the app.
                     Ok(n) => {
+                        ctr.rx.fetch_add(n as u64, Ordering::Relaxed);
                         // Learn IP -> hostname from DNS answers so host rules can match.
                         if self.dst.port() == 53 {
                             for (host, ip) in parse_dns_answers(&buf[..n]) {
@@ -979,6 +1141,43 @@ fn is_blocked_host(name: &str) -> bool {
         .and_then(|v| v.z());
     let _ = env.exception_clear();
     res.unwrap_or(false)
+}
+
+/// Reports a flow's unflushed byte delta to Kotlin (`NativeBridge.onFlowBytes`) so the
+/// per-app usage buckets accumulate. Kotlin resolves the owning app from the same 5-tuple
+/// the decide() callback used (positive uid lookups are cached there).
+fn report_flow_bytes(proto: jint, src: SocketAddr, dst: SocketAddr, rx: u64, tx: u64) {
+    let (Some(vm), Some(class_ref)) = (JVM.get(), BRIDGE_CLASS.get()) else {
+        return;
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_raw()) };
+    let (Ok(s), Ok(d)) = (
+        env.new_string(src.ip().to_string()),
+        env.new_string(dst.ip().to_string()),
+    ) else {
+        return;
+    };
+    let s_obj: JObject = s.into();
+    let d_obj: JObject = d.into();
+    let _ = env.call_static_method(
+        class,
+        "onFlowBytes",
+        "(ILjava/lang/String;ILjava/lang/String;IJJ)V",
+        &[
+            JValue::Int(proto),
+            JValue::Object(&s_obj),
+            JValue::Int(src.port() as jint),
+            JValue::Object(&d_obj),
+            JValue::Int(dst.port() as jint),
+            JValue::Long(rx as jlong),
+            JValue::Long(tx as jlong),
+        ],
+    );
+    let _ = env.exception_clear();
 }
 
 /// Tell Kotlin (`NativeBridge.onStall`) the datapath has wedged so it can fail open (tear the tunnel

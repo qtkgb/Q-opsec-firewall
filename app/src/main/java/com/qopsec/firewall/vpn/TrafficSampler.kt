@@ -83,6 +83,7 @@ class TrafficSampler(context: Context) {
         job = scope.launch {
             Diag.life("stats sampler started (uid=$ownUid)")
             dao.trim(System.currentTimeMillis() - RETENTION_MS)
+            dao.trimApps(System.currentTimeMillis() - RETENTION_MS)
             // Baseline = counters at start, so only bytes moved while running are counted.
             var lastRx = TrafficStats.getUidRxBytes(ownUid)
             var lastTx = TrafficStats.getUidTxBytes(ownUid)

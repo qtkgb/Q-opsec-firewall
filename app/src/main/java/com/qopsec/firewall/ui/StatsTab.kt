@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qopsec.firewall.data.AppDatabase
+import com.qopsec.firewall.data.AppUsage
 import com.qopsec.firewall.data.UsageBucket
 import com.qopsec.firewall.vpn.TrafficSampler
 import kotlinx.coroutines.launch
@@ -62,6 +63,13 @@ private val WifiColor = Color(0xFF4F8CFF)
 private val MobileColor = Color(0xFFD9548A)
 
 private enum class Period(val label: String) { HOURLY("Hourly"), DAILY("Daily"), WEEKLY("Weekly"), MONTHLY("Monthly") }
+
+private enum class AppSort(val label: String) { HIGHEST("Highest"), LOWEST("Lowest"), ALPHA("A–Z") }
+
+/** One app's aggregated usage over the visible range. */
+private data class AppRow(val label: String, val rx: Long, val tx: Long) {
+    val total get() = rx + tx
+}
 
 /** One chart bar: an aggregated time bucket. */
 private data class Bar(
@@ -85,10 +93,13 @@ fun StatsTab() {
     val scope = rememberCoroutineScope()
     var period by remember { mutableStateOf(Period.DAILY) }
     var confirmClear by remember { mutableStateOf(false) }
+    var appSort by remember { mutableStateOf(AppSort.HIGHEST) }
 
     val since = remember(period) { rangeStart(period) }
     val rows by remember(period) { dao.since(since) }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val appUsage by remember(period) { dao.appsSince(since) }.collectAsStateWithLifecycle(initialValue = emptyList())
     val bars = remember(rows, period) { aggregate(rows, period) }
+    val appRows = remember(appUsage, appSort) { aggregateApps(appUsage, appSort) }
     val hasData = bars.any { it.total > 0 }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -143,6 +154,69 @@ fun StatsTab() {
             TotalCard("Total", wifiRx + mobRx, wifiTx + mobTx, Modifier.weight(1f))
         }
 
+        // Per-app breakdown for the same range: which apps move the data — and whether a
+        // Block visibly shrinks an app's appetite (the ads-are-eating-my-data check).
+        if (appRows.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Per app (${appRows.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                AppSort.entries.forEach { s ->
+                    FilterChip(
+                        selected = appSort == s,
+                        onClick = { appSort = s },
+                        label = { Text(s.label, style = MaterialTheme.typography.labelMedium) },
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+            }
+            val maxTotal = appRows.maxOf { it.total }.coerceAtLeast(1)
+            appRows.forEach { app ->
+                Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            app.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                        )
+                        Text(fmtBytes(app.total), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Magnitude bar: single hue (accent), length ∝ share of the biggest app.
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(fraction = (app.total.toFloat() / maxTotal).coerceIn(0.01f, 1f))
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(WifiColor),
+                            )
+                        }
+                        Text(
+                            "↓ ${fmtBytes(app.rx)} · ↑ ${fmtBytes(app.tx)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 10.dp),
+                        )
+                    }
+                }
+            }
+        }
+
         OutlinedButton(
             onClick = { confirmClear = true },
             modifier = Modifier.padding(top = 16.dp, bottom = 12.dp),
@@ -159,7 +233,10 @@ fun StatsTab() {
             confirmButton = {
                 TextButton(onClick = {
                     confirmClear = false
-                    scope.launch { dao.clearAll() }
+                    scope.launch {
+                        dao.clearAll()
+                        dao.clearAllApps()
+                    }
                 }) { Text("Clear", color = LocalStatusPalette.current.blocked) }
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
@@ -383,6 +460,25 @@ private fun aggregate(rows: List<UsageBucket>, p: Period): List<Bar> {
             }
         }
         Bar(axis, detail, wifiRx[idx], wifiTx[idx], mobRx[idx], mobTx[idx])
+    }
+}
+
+/** Sum per-app hourly rows over the visible range and order per the selected sort. */
+private fun aggregateApps(rows: List<AppUsage>, sort: AppSort): List<AppRow> {
+    val byApp = HashMap<String, AppRow>()
+    for (r in rows) {
+        val prev = byApp[r.appKey]
+        byApp[r.appKey] = AppRow(
+            label = r.label,
+            rx = (prev?.rx ?: 0) + r.rx,
+            tx = (prev?.tx ?: 0) + r.tx,
+        )
+    }
+    val list = byApp.values.filter { it.total > 0 }
+    return when (sort) {
+        AppSort.HIGHEST -> list.sortedByDescending { it.total }
+        AppSort.LOWEST -> list.sortedBy { it.total }
+        AppSort.ALPHA -> list.sortedBy { it.label.lowercase() }
     }
 }
 

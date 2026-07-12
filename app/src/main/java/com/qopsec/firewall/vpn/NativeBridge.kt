@@ -54,6 +54,14 @@ object NativeBridge {
     @JvmField
     var staller: (() -> Unit)? = null
 
+    /**
+     * Set by the service; receives a flow's byte delta (periodic for long flows + a final
+     * report at flow end) for the Stats per-app usage buckets. Native threads.
+     */
+    @Volatile
+    @JvmField
+    var bytesSink: ((proto: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, rx: Long, tx: Long) -> Unit)? = null
+
     private external fun nativeVersion(): String
 
     /** [logLevel]: 0 off / 1 info (lifecycle) / 2 debug (per-connection). See DiagLevel.toNative(). */
@@ -95,5 +103,10 @@ object NativeBridge {
     @JvmStatic
     fun onStall() {
         staller?.invoke()
+    }
+
+    @JvmStatic
+    fun onFlowBytes(proto: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, rx: Long, tx: Long) {
+        bytesSink?.invoke(proto, srcIp, srcPort, dstIp, dstPort, rx, tx)
     }
 }

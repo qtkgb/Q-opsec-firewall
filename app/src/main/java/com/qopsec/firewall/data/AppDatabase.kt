@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [Rule::class, RuleChange::class, ConnLog::class, Snapshot::class, UsageBucket::class],
-    version = 6,
+    entities = [Rule::class, RuleChange::class, ConnLog::class, Snapshot::class, UsageBucket::class, AppUsage::class],
+    version = 7,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -82,14 +82,32 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // v7: per-app hourly traffic buckets (Stats per-app breakdown).
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `app_usage` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`hourStart` INTEGER NOT NULL, `appKey` TEXT NOT NULL, " +
+                        "`label` TEXT NOT NULL, `rx` INTEGER NOT NULL, `tx` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_app_usage_hourStart_appKey` " +
+                        "ON `app_usage` (`hourStart`, `appKey`)"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "qopsec.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
-                    .build().also { INSTANCE = it }
+                ).addMigrations(
+                    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
+                    MIGRATION_6_7,
+                ).build().also { INSTANCE = it }
             }
     }
 }
