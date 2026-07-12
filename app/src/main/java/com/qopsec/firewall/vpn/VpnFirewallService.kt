@@ -65,9 +65,10 @@ class VpnFirewallService : VpnService() {
         const val EXTRA_BOOT_LOCK = "boot_lock"
         // Min interval between conn_log row refreshes for the same flow (see lastConnWrite).
         private const val CONN_WRITE_THROTTLE_MS = 2000L
-        // Re-query delays for flows whose uid lookup failed at SYN time (socket is established
-        // and registered by then; second chance covers short-lived flows caught in TIME_WAIT).
-        private val REATTRIBUTE_DELAYS_MS = longArrayOf(400L, 1600L)
+        // Re-query delays for flows whose uid lookup failed at SYN time. The first comes fast:
+        // short-lived flows (DNS-over-TCP, abandoned preconnects) close within a few hundred ms,
+        // and a closed/TIME_WAIT socket no longer answers with its real owner (kernel says uid 0).
+        private val REATTRIBUTE_DELAYS_MS = longArrayOf(150L, 700L, 2500L)
         private const val EXTRA_UID = "uid"
         private const val EXTRA_PKG = "pkg"
         private const val EXTRA_LABEL = "label"
@@ -355,7 +356,7 @@ class VpnFirewallService : VpnService() {
             settings.blockEncryptedDns.value && EncryptedDns.isEncryptedDns(host, dstIp, dstPort) -> DENY
             rule != null -> decision.action                   // broad app/global rule
             !settings.askMode.value -> ALLOW                  // ask-mode off: default allow
-            uid < 0 -> ALLOW                                  // can't attribute -> can't prompt
+            uid <= 0 -> ALLOW                                 // can't attribute (0 = TIME_WAIT artifact) -> can't prompt
             else -> {                                          // unknown app: prompt + hold
                 requestPrompt(uid, pkg, resolver.label(uid), host ?: "$dstIp:$dstPort")
                 PENDING

@@ -140,4 +140,21 @@ interface RuleDao {
             "AND ((proto = :proto AND dstIp = :ip) OR (:host IS NOT NULL AND dstHost = :host))",
     )
     suspend fun healSiblingsOf(proto: Int, ip: String, port: Int, host: String?)
+
+    // --- legacy "root" rows (kernel's uid-0 TIME_WAIT artifact) fold into "unknown" ---
+    // The lookup no longer surfaces uid 0, but rows written by older versions carry it, and the
+    // UI groups by uid — so uid-0 rows must become uid -1 (dropping any that already have a -1
+    // twin, since flowKey embeds the uid and is unique).
+
+    @Query(
+        "DELETE FROM conn_log WHERE appUid = 0 AND EXISTS (SELECT 1 FROM conn_log c2 " +
+            "WHERE c2.flowKey = '-1' || substr(conn_log.flowKey, instr(conn_log.flowKey, '|')))",
+    )
+    suspend fun dropUidZeroTwins()
+
+    @Query(
+        "UPDATE conn_log SET appUid = -1, appLabel = 'unknown', " +
+            "flowKey = '-1' || substr(flowKey, instr(flowKey, '|')) WHERE appUid = 0",
+    )
+    suspend fun relabelUidZeroRows()
 }

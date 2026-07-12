@@ -21,8 +21,8 @@ import java.util.concurrent.ConcurrentHashMap
 class AppResolver(context: Context) {
 
     companion object {
-        private const val UID_LOOKUP_ATTEMPTS = 4
-        private const val UID_RETRY_DELAY_MS = 5L   // progressive: 5/10/15 ms between attempts
+        private const val UID_LOOKUP_ATTEMPTS = 5
+        private const val UID_RETRY_DELAY_MS = 5L   // progressive: 5/10/15/20 ms between attempts
     }
 
     private val cm = context.getSystemService(ConnectivityManager::class.java)
@@ -58,10 +58,12 @@ class AppResolver(context: Context) {
             }
             if (uid > 0) {
                 uidByFlow[flowKey] = uid
-                break
+                return uid
             }
         }
-        return uid
+        // Never surface uid 0: the kernel answers 0 for TIME_WAIT/closed sockets, so it means
+        // "couldn't attribute", not "root". Collapse every failure to INVALID_UID.
+        return ConnectionEvent.INVALID_UID
     }
 
     /** First package name owning a UID, or null. Used to make app rules survive uid churn. */
@@ -70,8 +72,10 @@ class AppResolver(context: Context) {
 
     /** Human label for a UID (app name, or a sensible fallback). */
     fun label(uid: Int): String = when {
-        uid < 0 -> "unknown"
-        uid == 0 -> "root"
+        // uid 0 is NOT trustworthy: the kernel reports TIME_WAIT/closed sockets as uid 0, so a
+        // late lookup on a short-lived flow answers "root" for what was really an app's socket.
+        // Group it with the unattributable rest instead of showing a scary fake "root" app.
+        uid <= 0 -> "unknown"
         uid == ownUid -> "Q opsec firewall"
         else -> labelByUid.getOrPut(uid) {
             val pkgs = pm.getPackagesForUid(uid)
